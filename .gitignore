@@ -1,0 +1,15 @@
+*~
+*.zip
+*.log
+*.tgz
+*.tar.gz
+*.tar
+*.gz
+passwd.*
+*.passwd
+dev/
+tmp/
+DEADJOE
+scratching-post/*
+!scratching-post/README.md
+!scratching-post/.gitkeep
