@@ -1,0 +1,26 @@
+---
+namespace: webfargo
+name: check_point
+version: 0.1.0
+readme: README.md
+authors:
+  - Duane Toler <dtoler@webfargo.com>
+description: >-
+  Check Point Gaia OS automation modules for the Deployment Agent (da_cli),
+  facts gathering, and related operations.
+license:
+  - GPL-2.0-or-later
+tags:
+  - check_point
+  - firewall
+  - gaia
+  - deployment
+  - cpda
+repository: ""
+documentation: ""
+homepage: ""
+issues: ""
+build_ignore:
+  - "*.tar.gz"
+  - ".git"
+  - ".gitignore"
