@@ -368,6 +368,21 @@ class CkpFactsCollector:
         """Check if host is a cluster (HA) member."""
         return self._run_cpprod_util("FwIsHighAvail")
 
+    # ----- CPDA Facts -----
+
+    def gather_cpda(self):
+        """Check CPDA version"""
+        rc, stdout, stderr = self._run(
+            "dbget installer:da_build"
+        )
+
+        if rc != 0 or not stdout.strip():
+            return {"cpda_build" : 0}
+
+        return {
+            "cpda_build" : stdout.strip()
+        }
+
     # ----- Hardware Facts -----
 
     def gather_hardware(self):
@@ -460,6 +475,9 @@ def main():
 
     if collect_all or "hardware" in subset:
         facts["hardware"] = collector.gather_hardware()
+
+    if collect_all or "cpda" in subset:
+        facts["cpda"] = collector.gather_hardware()
 
     result = {
         "changed": False,
