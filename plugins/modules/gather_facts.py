@@ -368,6 +368,12 @@ class CkpFactsCollector:
         """Check if host is a cluster (HA) member."""
         return self._run_cpprod_util("FwIsHighAvail")
 
+    # ----- cpsnmpd Facts -----
+
+    def gather_cpsnmpd(self):
+        """Check for cpsnmpd"""
+        return self._run_cpprod_util("FwIsDoSNMP")
+
     # ----- CPDA Facts -----
 
     def gather_cpda(self):
@@ -478,6 +484,9 @@ def main():
 
     if collect_all or "cpda" in subset:
         facts["cpda"] = collector.gather_cpda()
+
+    if collect_all or "cpsnmpd" in subset:
+        facts["cpsnmpd"] = collector.gather_cpsnmpd()
 
     result = {
         "changed": False,
