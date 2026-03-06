@@ -477,7 +477,7 @@ def main():
         facts["hardware"] = collector.gather_hardware()
 
     if collect_all or "cpda" in subset:
-        facts["cpda"] = collector.gather_hardware()
+        facts["cpda"] = collector.gather_cpda()
 
     result = {
         "changed": False,
