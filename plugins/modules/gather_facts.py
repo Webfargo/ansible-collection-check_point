@@ -406,37 +406,45 @@ class CkpFactsCollector:
         )
 
         if rc != 0:
-            return {"platform": "unknown", "model": "unknown"}
+            return {"platform": "unknown", "model": "unknown", "cpu": "unknown"}
 
         output = stdout.strip()
 
-        # Determine platform
-        if "PowerEdge" in output:
-            platform = "dell"
-        elif "ProLiant" in output:
-            platform = "hp"
-        elif "Check Point" in output:
-            platform = "check_point_appliance"
-        elif any(v in output.lower() for v in ("vmware", "virtual", "kvm", "hyper-v")):
-            platform = "virtual"
-        else:
-            platform = "unknown"
-
-        # Extract model string (best effort)
+        platform = "unknown"
         model = "unknown"
+        cpu = "unknown"
+        platform_raw = "unknown"
+
         for line in output.splitlines():
-            # Look for a line containing the model info
-            # clish output varies but typically has a "Product Name" or
-            # similar field
-            if any(k in line for k in ("PowerEdge", "ProLiant", "Check Point")):
-                model = line.strip()
-                break
+            if ': ' not in line:
+                continue
+            key, _, value = line.partition(': ')
+            key = key.strip()
+            value = value.strip()
+
+            if key == "Platform":
+                platform_raw = value
+            elif key == "Model":
+                model = value
+            elif key == "CPU Model":
+                cpu = value
+
+        # Determine platform from both Platform and Model fields
+        combined = f"{platform_raw} {model}"
+        if "PowerEdge" in combined:
+            platform = "dell"
+        elif "ProLiant" in combined:
+            platform = "hp"
+        elif any(v in combined for v in ("Check Point", "CheckPoint")):
+            platform = "check_point_appliance"
+        elif any(v in combined.lower() for v in ("vmware", "virtual", "kvm", "hyper-v")):
+            platform = "virtual"
 
         return {
             "platform": platform,
-            "model": model,
+            "model": model if model != "unknown" else platform_raw,
+            "cpu": cpu,
         }
-
 
 def main():
     module = AnsibleModule(
