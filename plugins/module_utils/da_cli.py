@@ -123,6 +123,20 @@ class DaCliClient:
         action_id = response.get("action_id", response.get("Action ID", "-1"))
         return str(action_id) != "-1"
 
+    def _is_reboot_imminent(self, message):
+        """
+        Check if the action message signals an imminent reboot.
+        da_cli uses different messages per action type:
+          - Install:   "Going to reboot:"
+          - Uninstall: "Uninstallation Complete"
+          - Upgrade:   TBD
+        """
+        msg = message.lower()
+        return any(msg.startswith(trigger) for trigger in (
+            "going to reboot",
+            "uninstallation complete",
+        ))
+
     def poll_action(self, action_id, poll_interval=10, timeout=None,
                     is_upgrade=False):
         """
@@ -132,6 +146,17 @@ class DaCliClient:
         complete. Any action type (download, install, verify, upgrade)
         can show Progress "100" while Status remains "in progress" —
         always wait for Status to become "success" or "failure".
+
+        Reboot-triggering actions (install, uninstall, upgrade) emit a
+        reboot-imminent message in the Message field at Progress 100
+        while Status remains "in progress". Known signals:
+          - Install:   "Going to reboot:"
+          - Uninstall: "Uninstallation Complete"
+          - Upgrade:   TBD
+        When detected, the action is treated as successful and the
+        module returns before the host goes down. This requires
+        reboot_delay to be set on the da_cli command so at least one
+        poll cycle captures the message before the reboot fires.
 
         Args:
             action_id: The action ID to monitor
@@ -152,6 +177,7 @@ class DaCliClient:
         Raises:
             DaCliError if action fails or times out
         """
+
         effective_timeout = timeout or self.timeout
         elapsed = 0
         reboot_detected = False
@@ -164,13 +190,11 @@ class DaCliClient:
                 )
             except DaCliError:
                 if is_upgrade and progress_hit_100:
-                    # Expected: host is rebooting after upgrade reached 100
                     reboot_detected = True
                     time.sleep(poll_interval)
                     elapsed += poll_interval
                     continue
                 elif is_upgrade and reboot_detected:
-                    # Still rebooting, keep waiting
                     time.sleep(poll_interval)
                     elapsed += poll_interval
                     continue
@@ -179,9 +203,8 @@ class DaCliClient:
 
             current_status = status.get("status", "unknown")
             progress = status.get("progress", "0")
+            message = status.get("message", "") or ""
 
-            # Track if we've seen progress hit 100
-            # Progress can be an empty string (e.g. during delete)
             try:
                 progress_int = int(progress) if progress else 0
             except (ValueError, TypeError):
@@ -192,7 +215,6 @@ class DaCliClient:
             if current_status == "success":
                 return self.parse_embedded_message(status)
 
-            # "failure" is the actual key value from da_cli
             if current_status == "failure":
                 raise DaCliError(
                     f"Action {action_id} failed: "
@@ -200,13 +222,22 @@ class DaCliClient:
                     stdout=json.dumps(status),
                 )
 
+            # Reboot imminent — install/uninstall succeeded, reboot countdown
+            # started. Exit now before the connection drops.
+            # Requires reboot_delay to be set so we get at least one poll
+            # cycle with this message before the host goes down.
+            if (progress_hit_100
+                and current_status == "in progress"
+                and self._is_reboot_imminent(message)):
+                status["status"] = "success"
+
+                return self.parse_embedded_message(status)
+
             # Upgrade quirk: Status stays "in progress" at Progress 100,
             # then system reboots. Don't treat this as completion.
             if is_upgrade and progress_hit_100 and current_status == "in progress":
-                # Upgrade is about to reboot — keep polling
                 pass
 
-            # Still in progress
             time.sleep(poll_interval)
             elapsed += poll_interval
 
@@ -310,6 +341,7 @@ class DaCliClient:
         # Poll da_status until Update Status returns to "done"
         elapsed = 0
         update_status = ""
+
         while elapsed < effective_timeout:
             status = self.get_da_status()
             update_status = status.get("Update Status", "")
@@ -344,7 +376,8 @@ class DaCliClient:
         """Check if a specific package is installed."""
         for pkg in self.get_packages():
             if pkg.get("filename") == package_name:
-                return pkg.get("state") == "installed"
+                return pkg.get("state", "").lower().startswith("installed")
+
         return False
 
     def is_package_in_repository(self, package_name):
@@ -352,6 +385,7 @@ class DaCliClient:
         for pkg in self.get_packages():
             if pkg.get("filename") == package_name:
                 return pkg.get("isInRepository", False)
+
         return False
 
     def find_recommended_jumbo(self):
