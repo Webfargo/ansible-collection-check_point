@@ -158,27 +158,63 @@ from ansible_collections.webfargo.check_point.plugins.module_utils.da_cli import
 )
 
 
-def find_recommended_jumbo(packages):
-    """Find the Recommended Jumbo HFA (category=jumbo, not installed, tagged)."""
-    for pkg in packages:
-        if (pkg.get("category") == "jumbo"
-                and "installedOn" not in pkg
-                and pkg.get("tag", {}).get("importance") == "latest"):
-            return pkg
-    return None
+def query_by_name(module, client):
+    pkg_name = module.params["name"]
+    data = client.run(f"package_info package={pkg_name}", raw=True)
+
+    return {
+        "package": data,
+        "found": True,
+    }
 
 
-def find_latest_jumbo(packages):
-    """Find the Latest (beta) Jumbo HFA (category=jumbo, not installed, no tag)."""
-    candidates = [
-        pkg for pkg in packages
-        if (pkg.get("category") == "jumbo"
-            and "installedOn" not in pkg
-            and not pkg.get("tag", {}).get("importance"))
+def query_by_jumbo(module, client):
+    if module.params["jumbo"] == "recommended":
+        jumbo = client.find_recommended_jumbo()
+    else:
+        jumbo = client.find_latest_jumbo()
+
+    if jumbo:
+        return {
+            "package": jumbo,
+            "found": True,
+        }
+
+    return {
+        "package": {},
+        "found": False,
+    }
+
+
+def query_by_category(module, client):
+    data = client.run("packages_info", raw=True)
+    packages = [
+        pkg for pkg in data.get("packages", [])
+        if pkg.get("category") == module.params["category"]
     ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: int(p.get("build", 0)))
+
+    return {
+        "packages": packages,
+        "count": len(packages),
+        "found": len(packages) > 0,
+    }
+
+
+def query_by_status(module, client):
+    status = module.params["status"] or "all"
+    cmd = "packages_info"
+
+    if status != "all":
+        cmd += f" status={status}"
+
+    data = client.run(cmd, raw=True)
+    packages = data.get("packages", [])
+
+    return {
+        "packages": packages,
+        "count": data.get("numberOfPackages", len(packages)),
+        "found": len(packages) > 0,
+    }
 
 
 def main():
@@ -192,7 +228,7 @@ def main():
                     "available_for_install", "installed",
                     "recommended", "visible",
                 ],
-                default="all",
+                default=None,
             ),
             jumbo=dict(
                 type="str",
@@ -220,61 +256,17 @@ def main():
     result = {"changed": False}
 
     try:
-        # Optionally sync with remote repository first
-        # check_for_updates is async despite returning Action ID -1;
-        # client.check_for_updates() polls da_status until done
         if module.params["refresh"] and not module.check_mode:
             client.check_for_updates(timeout=module.params["timeout"])
 
         if module.params["name"]:
-            # Single package query by name
-            pkg_name = module.params["name"]
-            data = client.run(
-                f"package_info package={pkg_name}", raw=True
-            )
-            result["package"] = data
-            result["found"] = True  # would have errored if not found
-
+            result.update(query_by_name(module, client))
         elif module.params["jumbo"]:
-            # Smart Jumbo HFA selection by train
-            data = client.run("packages_info", raw=True)
-            packages = data.get("packages", [])
-
-            if module.params["jumbo"] == "recommended":
-                jumbo = find_recommended_jumbo(packages)
-            else:
-                jumbo = find_latest_jumbo(packages)
-
-            if jumbo:
-                result["package"] = jumbo
-                result["found"] = True
-            else:
-                result["package"] = {}
-                result["found"] = False
-
+            result.update(query_by_jumbo(module, client))
         elif module.params["category"]:
-            # Filter by package category
-            data = client.run("packages_info", raw=True)
-            packages = [
-                pkg for pkg in data.get("packages", [])
-                if pkg.get("category") == module.params["category"]
-            ]
-            result["packages"] = packages
-            result["count"] = len(packages)
-            result["found"] = len(packages) > 0
-
+            result.update(query_by_category(module, client))
         else:
-            # List packages with optional status filter
-            status = module.params["status"]
-            cmd = "packages_info"
-            if status != "all":
-                cmd += f" status={status}"
-
-            data = client.run(cmd, raw=True)
-            packages = data.get("packages", [])
-            result["packages"] = packages
-            result["count"] = data.get("numberOfPackages", len(packages))
-            result["found"] = len(packages) > 0
+            result.update(query_by_status(module, client))
 
     except DaCliError as e:
         module.fail_json(msg=str(e))
