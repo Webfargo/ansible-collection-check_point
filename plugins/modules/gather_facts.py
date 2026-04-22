@@ -14,8 +14,8 @@ short_description: Gather Check Point Gaia OS specific facts
 description:
   - Collects Check Point-specific system information from Gaia OS hosts
     including SIC configuration, host type (gateway/management/standalone),
-    installed firewall policy, hotfix versions, VSX status, cluster status,
-    and hardware platform.
+    installed firewall policy, hotfix versions, build take info, VSX status,
+    cluster status, and hardware platform.
   - All facts are returned in a structured dict under C(facts) and
     optionally injected into C(ansible_facts) for downstream use.
 options:
@@ -26,7 +26,7 @@ options:
       - Individual subsets can be specified to limit collection.
     type: list
     elements: str
-    choices: [all, sic, host_type, policy, hotfixes, vsx, cluster, hardware]
+    choices: [all, sic, host_type, policy, hotfixes, take, vsx, cluster, hardware]
     default: [all]
   set_ansible_facts:
     description:
@@ -83,27 +83,30 @@ facts:
   returned: always
   type: dict
   contains:
-    sic:
-      description: SIC certificate and identity information
-      type: dict
-    host_type:
-      description: Gateway/management/standalone classification
-      type: dict
-    policy:
-      description: Installed firewall policy (gateway only)
-      type: dict
-    hotfixes:
-      description: Installed hotfixes keyed by product name
-      type: dict
-    vsx:
-      description: Whether host is a VSX gateway
-      type: bool
     cluster:
       description: Whether host is a cluster (HA) member
       type: bool
     hardware:
       description: Hardware platform information
       type: dict
+    host_type:
+      description: Gateway/management/standalone classification
+      type: dict
+    hotfixes:
+      description: Installed hotfixes keyed by product name
+      type: dict
+    policy:
+      description: Installed firewall policy (gateway only)
+      type: dict
+    sic:
+      description: SIC certificate and identity information
+      type: dict
+    take:
+      description: OS code name and build take number
+      type: dict
+    vsx:
+      description: Whether host is a VSX gateway
+      type: bool
 """
 
 
@@ -144,6 +147,7 @@ class CkpFactsCollector:
             True if output is "1", False otherwise
         """
         rc, stdout, stderr = self._run(f"cpprod_util {check}")
+
         return stdout.strip() == "1"
 
     # ----- SIC Facts -----
@@ -186,6 +190,7 @@ class CkpFactsCollector:
             return {"error": "Could not read SIC registry"}
 
         line = stdout.strip()
+
         result = {}
 
         # Extract ICAdn — case-insensitive O= prefix
@@ -201,6 +206,7 @@ class CkpFactsCollector:
             r'(?:,(?:[Oo])=(\S+))?',
             line,
         )
+
         if m:
             result["cn"] = m.group(1)
             if m.group(2):
@@ -212,11 +218,13 @@ class CkpFactsCollector:
 
         # Extract CertPath
         m = re.search(r'CertPath=\[s\](\S+)', line)
+
         if m:
             result["cert_path"] = m.group(1)
 
         # Extract ICAip — only present on gateways (not mgmt/standalone)
         m = re.search(r'ICAip=\[s\]([0-9.]+)', line)
+
         if m:
             result["ica_ip"] = m.group(1)
         # If no ICAip, this host IS the management server.
@@ -266,6 +274,7 @@ class CkpFactsCollector:
             return {}
 
         rc, stdout, stderr = self._run("fw stat")
+
         if rc != 0 or not stdout.strip():
             return {"error": "fw stat failed or no policy installed"}
 
@@ -285,6 +294,31 @@ class CkpFactsCollector:
         return {"raw": stdout.strip()}
 
     # ----- Hotfix / JHF Facts -----
+    def gather_take_info(self):
+        """
+        Parse output of take.info command for build code name and take number
+
+        Example output for R81.20:
+            ivory_main;631
+        """
+        rc, stdout, stderr = self._run("cat /sysimg/CPwrapper/linux/MiniWrapper/take.info")
+
+        if rc != 0 or not stdout.strip():
+            return {"error" : "take.info failed"}
+
+        m = re.search(
+            r'([^;]+);(\S+)',
+            stdout,
+        )
+
+        if m:
+            return {
+                "code_name"   : m.group(1),
+                "take"        : m.group(1),
+                "take_info"   : stdout.strip(),
+            }
+
+        return {"raw" : stdout.strip() }
 
     def gather_hotfixes(self):
         """
@@ -328,11 +362,13 @@ class CkpFactsCollector:
                 continue
 
             stripped = line.strip()
+
             if not stripped:
                 continue
 
             # Jumbo HF main take: "HOTFIX_R80_40_JUMBO_HF_MAIN  Take:  83"
             m = re.match(r'(HOTFIX_\S*JUMBO_HF_MAIN)\s+Take:\s+(\d+)', stripped)
+
             if m:
                 result[current_product]["jhf"] = m.group(2)
                 result[current_product]["hotfixes"].append(m.group(1))
@@ -342,14 +378,18 @@ class CkpFactsCollector:
             # This is an alternative JHF version indicator; use it if
             # JUMBO_HF_MAIN wasn't found
             m = re.match(r'(HOTFIX_\S*JHF_COMP)\s+Take:\s+(\d+)', stripped)
+
             if m:
                 if result[current_product]["jhf"] is None:
                     result[current_product]["jhf"] = m.group(2)
+
                 result[current_product]["hotfixes"].append(m.group(1))
+
                 continue
 
             # Other hotfix line (no Take): "HOTFIX_PUBLIC_CLOUD_CA_..."
             m = re.match(r'(HOTFIX_\S+)', stripped)
+
             if m:
                 result[current_product]["hotfixes"].append(m.group(1))
                 continue
@@ -418,6 +458,7 @@ class CkpFactsCollector:
         for line in output.splitlines():
             if ': ' not in line:
                 continue
+
             key, _, value = line.partition(': ')
             key = key.strip()
             value = value.strip()
@@ -431,6 +472,7 @@ class CkpFactsCollector:
 
         # Determine platform from both Platform and Model fields
         combined = f"{platform_raw} {model}"
+
         if "PowerEdge" in combined:
             platform = "dell"
         elif "ProLiant" in combined:
@@ -475,11 +517,15 @@ def main():
 
     # Policy only makes sense on gateways
     is_gw = facts.get("host_type", {}).get("is_gateway", True)
+
     if collect_all or "policy" in subset:
         facts["policy"] = collector.gather_policy(is_gateway=is_gw)
 
     if collect_all or "hotfixes" in subset:
         facts["hotfixes"] = collector.gather_hotfixes()
+
+    if collect_all or "take" in subset:
+        facts["take"] = collector.gather_take_info()
 
     if collect_all or "vsx" in subset:
         facts["vsx"] = collector.gather_vsx()
