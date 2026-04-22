@@ -15,6 +15,15 @@ description:
   - This is the escape hatch for operations not covered by the
     higher-level modules.
 options:
+  changed:
+    description:
+      - Override the changed status of the task.
+      - By default, action commands (Action ID != -1) are assumed to
+        change state. Use this to explicitly set changed to false for
+        known read-only commands, or true for commands that change state
+        but do not return an Action ID (such as check_for_updates).
+    type: bool
+    default: null
   command:
     description:
       - The da_cli subcommand and arguments to execute.
@@ -75,18 +84,25 @@ EXAMPLES = r"""
 """
 
 RETURN = r"""
-response:
-  description: Parsed JSON response from da_cli
-  returned: always
-  type: dict
 action_id:
   description: Action ID if this was an action command
   returned: when command is an action command
   type: str
+changed:
+  description: >
+    Whether the command changed state. Defaults to true for action
+    commands, false for non-action commands, or the value of the
+    C(changed) parameter if explicitly set.
+  returned: always
+  type: bool
 is_action:
   description: Whether this was an action command (Action ID != -1)
   returned: always
   type: bool
+response:
+  description: Parsed JSON response from da_cli
+  returned: always
+  type: dict
 """
 
 from ansible.module_utils.basic import AnsibleModule
@@ -104,6 +120,7 @@ def main():
             poll_interval=dict(type="int", default=10),
             timeout=dict(type="int", default=300),
             parse_message=dict(type="bool", default=True),
+            changed=dict(type="bool", default=None),
         ),
         supports_check_mode=False,
     )
@@ -127,7 +144,7 @@ def main():
         is_action = client.is_action_command(response)
 
         result = {
-            "changed": is_action,  # Assume action commands change state
+            "changed": params["changed"] if params["changed"] is not None else is_action,
             "response": response,
             "is_action": is_action,
         }
