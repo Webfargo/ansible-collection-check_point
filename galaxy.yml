@@ -1,7 +1,7 @@
 ---
 namespace: webfargo
 name: check_point
-version: 0.4.1
+version: 0.5.0
 readme: README.md
 authors:
   - Duane Toler <dtoler@webfargo.com>
