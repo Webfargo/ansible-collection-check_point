@@ -93,12 +93,63 @@ update_status:
   type: str
 """
 
+import time
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.webfargo.check_point.plugins.module_utils.da_cli import (
     DaCliClient,
     DaCliError,
 )
 
+
+def get_status(client):
+    """Fetch da_status and build result fields."""
+    status = client.get_da_status()
+
+    return {
+        "da_status": status,
+        "build_number": client.get_build_number() or "unknown",
+        "service_state": status.get("DAService State", "unknown"),
+        "installation_in_progress": status.get("Installation in Progress", False),
+        "update_status": status.get("Update Status", "unknown"),
+        "ready": (
+            status.get("DAService State") == "ready"
+            and not status.get("Installation in Progress", False)
+            and status.get("Update Status") == "done"
+        ),
+    }
+
+
+def get_pending_reboot(client):
+    """Check pending reboot state. Returns True/False/None for older builds."""
+    try:
+        reboot_data = client.run("is_pending_reboot", raw=True)
+        msg = reboot_data.get("Message", "")
+
+        return msg.lower() != "no reboot"
+    except DaCliError:
+        return None
+
+
+def wait_until_ready(module, client):
+    """Poll until DA is ready or timeout. Calls fail_json on timeout."""
+    timeout = module.params["timeout"]
+    elapsed = 0
+    poll_interval = 10
+
+    while elapsed < timeout:
+        if client.is_ready():
+            return
+
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+    else:
+        status = client.get_da_status()
+
+        module.fail_json(
+            msg=f"DA not ready after {timeout}s "
+                f"(state: {status.get('DAService State')}, "
+                f"update: {status.get('Update Status')})"
+        )
 
 def main():
     module = AnsibleModule(
@@ -114,54 +165,10 @@ def main():
 
     try:
         if module.params["wait_for_ready"] and not module.check_mode:
-            # Poll until fully ready
-            timeout = module.params["timeout"]
-            elapsed = 0
-            poll_interval = 10
-            while elapsed < timeout:
-                status = client.get_da_status()
-                if (status.get("DAService State") == "ready"
-                        and not status.get("Installation in Progress", False)
-                        and status.get("Update Status") == "done"):
-                    break
-                import time
-                time.sleep(poll_interval)
-                elapsed += poll_interval
-            else:
-                module.fail_json(
-                    msg=f"DA not ready after {timeout}s "
-                        f"(state: {status.get('DAService State')}, "
-                        f"update: {status.get('Update Status')})"
-                )
-        else:
-            status = client.get_da_status()
+            wait_until_ready(module, client)
 
-        result["da_status"] = status
-        result["build_number"] = client.get_build_number() or "unknown"
-        result["service_state"] = status.get("DAService State", "unknown")
-        result["installation_in_progress"] = status.get(
-            "Installation in Progress", False
-        )
-        result["update_status"] = status.get("Update Status", "unknown")
-
-        result["ready"] = (
-            result["service_state"] == "ready"
-            and not result["installation_in_progress"]
-            and result["update_status"] == "done"
-        )
-
-        # Pending reboot check
-        # Response: {"Action ID": "0", "Message": "no reboot"}
-        # The "Message" field indicates reboot state; "no reboot"
-        # means no reboot pending. This command is a recent addition
-        # and may not exist on older DA builds.
-        try:
-            reboot_data = client.run("is_pending_reboot", raw=True)
-            msg = reboot_data.get("Message", "")
-            result["pending_reboot"] = msg.lower() != "no reboot"
-        except DaCliError:
-            # Command may not exist on older builds; not critical
-            result["pending_reboot"] = None
+        result.update(get_status(client))
+        result["pending_reboot"] = get_pending_reboot(client)
 
     except DaCliError as e:
         module.fail_json(msg=str(e))
