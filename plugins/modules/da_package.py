@@ -13,16 +13,20 @@ description:
   - Download, import, verify, install, upgrade, uninstall, and delete
     packages using the Check Point Deployment Agent CLI (da_cli).
   - Action commands are polled automatically until completion.
-  - If C(name) is omitted for install/verify operations, the module
-    auto-detects the latest Jumbo HFA from the local repository.
+  - If C(name) is omitted for install, verify, or download operations,
+    the module auto-detects the latest Jumbo HFA from the local repository.
   - Supports check mode for all operations.
+  - Operations that trigger a reboot (install, uninstall, upgrade) require
+    a C(wait_for_connection) task after the module call to handle the
+    host coming back online. Use C(reboot_delay) to ensure the module
+    receives a clean result before the reboot fires.
 options:
   name:
     description:
       - Package filename.
       - If omitted for C(install), C(verify), or C(download) operations,
-        the module auto-selects the latest Jumbo HFA
-        (tag.importance == "latest").
+        the module auto-selects the Recommended Jumbo HFA
+        (tag.importance == latest).
     type: str
   state:
     description:
@@ -30,20 +34,19 @@ options:
       - C(downloaded) ensures the package is downloaded from the
         public online repository.
       - C(private_download) downloads an unpublished package from
-        Check Point's online repository using C(add_private_package).
-        The package name must be known but won't appear in public
+        the Check Point online repository using C(add_private_package).
+        The package name must be known but will not appear in public
         package listings.
       - C(imported) imports a package file already on the host filesystem
-        into the DA repository (requires C(location)).
+        into the DA repository. Requires C(location).
       - C(verified) ensures the package passes pre-install verification.
-      - C(installed) ensures the package is installed (implies download
-        and verify if needed).
-      - C(upgraded) performs an upgrade operation (for major version jumps).
+        This operation is informational and does not change system state.
+      - C(installed) ensures the package is installed. Automatically runs
+        verify before install unless C(verify_before_install) is false.
+      - C(upgraded) performs a major version upgrade operation.
         Verify checks C(upgrade.applicable) for eligibility.
-      - C(absent) uninstalls or deletes the package.
-      - Note: C(clean_install) is not a separate state; use
-        C(da_command) with C(command="clean_install package=...") for
-        fresh installs of version upgrade packages.
+      - C(absent) uninstalls an installed package or deletes a downloaded
+        package from the local repository.
     type: str
     choices: [downloaded, private_download, imported, verified, installed, upgraded, absent]
     required: true
@@ -52,18 +55,24 @@ options:
       - Directory path on the remote host where the package file resides.
       - Required when C(state=imported).
       - Despite da_cli documentation suggesting this is optional for
-        C(import), it is actually mandatory.
+        import operations, it is actually mandatory.
     type: str
   reboot_delay:
     description:
-      - Delay in seconds before rebooting after install/upgrade/uninstall.
-      - Only applicable for operations that trigger a reboot.
+      - Delay in seconds before rebooting after install, upgrade, or uninstall.
+      - A minimum value of 30 is strongly recommended. This creates a polling
+        window where da_cli emits a reboot-imminent signal before the host
+        goes down, allowing the module to return a clean result to Ansible
+        rather than losing the SSH connection mid-operation.
+      - If set too low or omitted, the host may reboot before the module
+        receives a clean result, causing a false failure.
     type: int
+    default: 30
   uninstall_method:
     description:
-      - Uninstall method when C(state=absent).
+      - Uninstall method when C(state=absent) and the package is installed.
       - C(completely) removes the package entirely.
-      - C(last_take) reverts to the previous take/snapshot.
+      - C(last_take) reverts to the previous take or snapshot.
     type: str
     choices: [completely, last_take]
   role:
@@ -72,21 +81,29 @@ options:
     type: str
   refresh:
     description:
-      - Run C(check_for_updates) before the operation.
+      - Run C(check_for_updates) before the operation to sync the local
+        package catalog with the Check Point cloud repository.
     type: bool
     default: false
   verify_before_install:
     description:
-      - Automatically run verify before install.
-      - Only relevant when C(state=installed).
+      - Automatically run verify before install or upgrade.
+      - Checks C(install.applicable) for C(state=installed) and
+        C(upgrade.applicable) for C(state=upgraded).
+      - A verify result indicating the package is already installed
+        (DEPENDENCY message-code) is treated as success rather than failure.
     type: bool
     default: true
   poll_interval:
-    description: Seconds between status polls for action commands.
+    description:
+      - Seconds between status polls for action commands.
     type: int
     default: 15
   timeout:
-    description: Maximum seconds to wait for an action to complete.
+    description:
+      - Maximum seconds to wait for an action to complete.
+      - For install and upgrade operations on physical hardware, this may
+        need to be increased significantly beyond the default.
     type: int
     default: 900
 author:
@@ -95,26 +112,26 @@ author:
 
 EXAMPLES = r"""
 # Download a specific package
-- name: Download Jumbo HFA T84
+- name: Download Jumbo HFA T91
   webfargo.check_point.da_package:
-    name: "Check_Point_R81_20_JUMBO_HF_MAIN_Bundle_T84_FULL.tgz"
+    name: "Check_Point_R82_jumbo_hf_main_Bundle_T91_FULL.tgz"
     state: downloaded
     refresh: true
 
-# Download an unpublished (private) package from Check Point Cloud
+# Download an unpublished (private) package from Check Point cloud
 - name: Download private hotfix from CP cloud
   webfargo.check_point.da_package:
-    name: "Check_Point_R81_20_PRIVATE_HF_12345.tgz"
+    name: "Check_Point_R82_PRIVATE_HF_12345.tgz"
     state: private_download
 
-# Import a package that was SCP'd to the host
+# Import a package already copied to the host filesystem
 - name: Import private hotfix
   webfargo.check_point.da_package:
     name: "custom_hotfix_HF123.tgz"
     state: imported
     location: "/var/tmp"
 
-# Install latest Jumbo HFA (auto-detect)
+# Install the auto-detected Recommended Jumbo HFA
 - name: Install latest Jumbo HFA
   webfargo.check_point.da_package:
     state: installed
@@ -123,34 +140,44 @@ EXAMPLES = r"""
   register: install_result
 
 # Install a specific package
-- name: Install specific Jumbo
+- name: Install specific Jumbo HFA
   webfargo.check_point.da_package:
-    name: "Check_Point_R81_20_JUMBO_HF_MAIN_Bundle_T84_FULL.tgz"
+    name: "Check_Point_R81_20_JUMBO_HF_MAIN_Bundle_T80_FULL.tgz"
     state: installed
-    reboot_delay: 60
+  register: install_result
 
-# Verify only (dry-run before install)
+# Wait for host to come back after reboot
+- name: Wait for SSH to go down
+  ansible.builtin.wait_for_connection:
+    connect_timeout: 3
+    delay: 90
+    sleep: 10
+    timeout: 600
+  when: install_result.changed
+
+# Verify only (informational, no state change)
 - name: Pre-verify package
   webfargo.check_point.da_package:
-    name: "Check_Point_R81_20_JUMBO_HF_MAIN_Bundle_T84_FULL.tgz"
+    name: "Check_Point_R82_jumbo_hf_main_Bundle_T91_FULL.tgz"
     state: verified
   register: verify_result
 
-- name: Check verify details
-  debug:
-    msg: "Install applicable: {{ verify_result.verify_details.install.applicable }}"
+- name: Show verify details
+  ansible.builtin.debug:
+    msg: "Install applicable {{ verify_result.verify_details.install.applicable }}"
 
-# Uninstall a package
-- name: Remove old Jumbo
+# Uninstall a package completely
+- name: Uninstall hotfix
   webfargo.check_point.da_package:
-    name: "Check_Point_R81_20_JUMBO_HF_MAIN_Bundle_T80_FULL.tgz"
+    name: "mgmt_wrapper_HOTFIX_R82_JHF_T60_000_MAIN_GA_FULL.tgz"
     state: absent
     uninstall_method: completely
+  register: uninstall_result
 
-# Delete old package from repository (doesn't uninstall)
-- name: Clean up old packages
+# Delete a downloaded package from the local repository (does not uninstall)
+- name: Remove old Jumbo from repository
   webfargo.check_point.da_package:
-    name: "Check_Point_R81_20_JUMBO_HF_MAIN_Bundle_T80_FULL.tgz"
+    name: "Check_Point_R82_jumbo_hf_main_Bundle_T80_FULL.tgz"
     state: absent
 """
 
@@ -199,6 +226,7 @@ from ansible_collections.webfargo.check_point.plugins.module_utils.da_cli import
 def find_recommended_jumbo(client):
     """Auto-detect the Recommended Jumbo HFA package. Returns filename or None."""
     pkg = client.find_recommended_jumbo()
+
     return pkg.get("filename") if pkg else None
 
 
@@ -210,7 +238,334 @@ def get_package_state(client, package_name):
                 return pkg
     except DaCliError:
         pass
+
     return None
+
+
+def normalize_pkg_state(current):
+    """
+    Normalize da_cli's freeform state strings to internal values.
+
+    Known state strings:
+      "Installed Successfully"  -> "installed"
+      "Available for Install"   -> "available"
+      "Available for download"  -> "not_downloaded"
+    """
+    if not current:
+        return "unknown"
+
+    _cs = current.get("state", "").lower()
+
+    if _cs.startswith("installed"):
+        return "installed"
+    elif "for install" in _cs:
+        return "available"
+    elif "for download" in _cs:
+        return "not_downloaded"
+
+    return "unknown"
+
+
+def _parse_verify_message(action_result):
+    """Extract and parse the embedded JSON from a verify action result."""
+    msg = action_result.get("message", "")
+
+    if isinstance(msg, dict):
+        return msg
+
+    if isinstance(msg, str) and msg:
+        try:
+            return json.loads(msg)
+        except (json.JSONDecodeError, TypeError):
+            return {"raw": msg}
+
+    return {}
+
+
+def _run_verify(module, client, params, package_name):
+    """
+    Run verify and return parsed verify_details.
+    Raises DaCliError on failure.
+    """
+    verify_cmd = f"verify package={package_name}"
+
+    if params["role"]:
+        verify_cmd += f" role={params['role']}"
+
+    verify_result = client.run_action(
+        verify_cmd,
+        poll_interval=params["poll_interval"],
+        timeout=params["timeout"],
+    )
+
+    return _parse_verify_message(verify_result)
+
+
+def _extract_warnings(verify_details, key):
+    """Extract warning messages from verify_details for a given key."""
+    warning = verify_details.get(key, {})
+
+    if warning.get("applicable") and warning.get("messages"):
+        return [
+            m.get("text", "")
+            for m in warning["messages"]
+            if m.get("text")
+        ]
+
+    return []
+
+
+def state_downloaded(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if current and current.get("isInRepository"):
+        result["status"] = "already_downloaded"
+        result["changed"] = False
+    elif module.check_mode:
+        result["status"] = "would_download"
+        result["changed"] = True
+    else:
+        action_result = client.run_action(
+            f"download package={package_name}",
+            poll_interval=params["poll_interval"],
+            timeout=params["timeout"],
+        )
+        result.update(action_result)
+        result["changed"] = True
+
+    return result
+
+
+def state_private_download(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if current and current.get("isInRepository"):
+        result["status"] = "already_downloaded"
+        result["changed"] = False
+    elif module.check_mode:
+        result["status"] = "would_download_private"
+        result["changed"] = True
+    else:
+        action_result = client.run_action(
+            f"add_private_package package={package_name}",
+            poll_interval=params["poll_interval"],
+            timeout=params["timeout"],
+        )
+        result.update(action_result)
+        result["changed"] = True
+
+    return result
+
+
+def state_imported(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if current and current.get("isInRepository"):
+        result["status"] = "already_in_repository"
+        result["changed"] = False
+    elif module.check_mode:
+        result["status"] = "would_import"
+        result["changed"] = True
+    else:
+        action_result = client.run_action(
+            f"import package={package_name} location={params['location']}",
+            poll_interval=params["poll_interval"],
+            timeout=params["timeout"],
+        )
+        result.update(action_result)
+        result["changed"] = True
+
+    return result
+
+
+def state_verified(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if module.check_mode:
+        result["status"] = "would_verify"
+        result["changed"] = False
+        return result
+
+    action_result = client.run_action(
+        f"verify package={package_name}"
+        + (f" role={params['role']}" if params["role"] else ""),
+        poll_interval=params["poll_interval"],
+        timeout=params["timeout"],
+    )
+
+    result.update(action_result)
+    result["changed"] = False
+    result["verify_details"] = _parse_verify_message(action_result)
+
+    return result
+
+
+def state_installed(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if _pkg_state == "installed":
+        result["status"] = "already_installed"
+        result["changed"] = False
+        return result
+
+    if module.check_mode:
+        result["status"] = "would_install"
+        result["changed"] = True
+        return result
+
+    # Step 1: Verify (if requested)
+    if params["verify_before_install"]:
+        try:
+            verify_details = _run_verify(module, client, params, package_name)
+        except DaCliError:
+            recheck = get_package_state(client, package_name)
+
+            if recheck:
+                _recheck_cs = recheck.get("state", "").lower()
+
+                if _recheck_cs.startswith("installed"):
+                    result["status"] = "already_installed"
+                    result["changed"] = False
+                    return result
+            raise
+
+        result["verify_details"] = verify_details
+
+        install_info = verify_details.get("install", {})
+
+        if install_info and not install_info.get("applicable"):
+            msgs = install_info.get("messages", []) or []
+
+            if any(m.get("message-code") == "DEPENDENCY" for m in msgs):
+                result["status"] = "already_installed"
+                result["changed"] = False
+                return result
+
+            module.fail_json(
+                msg="Package verification indicates install is not applicable",
+                verify_details=verify_details,
+            )
+
+        warnings = _extract_warnings(verify_details, "warning-install")
+
+        if warnings:
+            result["warnings"] = warnings
+
+    # Step 2: Install
+    action_result = client.run_action(
+        f"install package={package_name} reboot_delay={params['reboot_delay']}",
+        poll_interval=params["poll_interval"],
+        timeout=params["timeout"],
+    )
+
+    result.update(action_result)
+    result["changed"] = True
+    return result
+
+
+def state_upgraded(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if module.check_mode:
+        result["status"] = "would_upgrade"
+        result["changed"] = True
+        return result
+
+    if params["verify_before_install"]:
+        verify_details = _run_verify(module, client, params, package_name)
+        result["verify_details"] = verify_details
+
+        upgrade_info = verify_details.get("upgrade", {})
+
+        if upgrade_info and not upgrade_info.get("applicable"):
+            module.fail_json(
+                msg="Package verification indicates upgrade is not applicable",
+                verify_details=verify_details,
+            )
+
+        warnings = _extract_warnings(verify_details, "warning-upgrade")
+
+        if warnings:
+            result["warnings"] = warnings
+
+    action_result = client.run_action(
+        f"upgrade package={package_name} reboot_delay={params['reboot_delay']}",
+        poll_interval=params["poll_interval"],
+        timeout=params["timeout"],
+        is_upgrade=True,
+    )
+
+    result.update(action_result)
+    result["changed"] = True
+    return result
+
+
+def state_absent(module, client, params, package_name, current, _pkg_state):
+    result = {}
+
+    if not current:
+        result["status"] = "not_present"
+        result["changed"] = False
+        return result
+
+    if _pkg_state == "installed":
+        if module.check_mode:
+            result["status"] = "would_uninstall"
+            result["changed"] = True
+            return result
+
+        uninstall_cmd = (
+            f"uninstall package={package_name}"
+            f" reboot_delay={params['reboot_delay']}"
+        )
+
+        if params["uninstall_method"]:
+            uninstall_cmd += f" method={params['uninstall_method']}"
+
+        action_result = client.run_action(
+            uninstall_cmd,
+            poll_interval=params["poll_interval"],
+            timeout=params["timeout"],
+        )
+
+        result.update(action_result)
+        result["changed"] = True
+
+        return result
+
+    # Not installed — delete from repo if locally present
+    if _pkg_state == "not_downloaded":
+        result["status"] = "not_present"
+        result["changed"] = False
+
+        return result
+
+    if module.check_mode:
+        result["status"] = "would_delete"
+        result["changed"] = True
+
+        return result
+
+    action_result = client.run_action(
+        f"delete package={package_name}",
+        poll_interval=params["poll_interval"],
+        timeout=params["timeout"],
+    )
+
+    result.update(action_result)
+    result["changed"] = True
+    return result
+
+
+STATE_HANDLERS = {
+    "downloaded": state_downloaded,
+    "private_download": state_private_download,
+    "imported": state_imported,
+    "verified": state_verified,
+    "installed": state_installed,
+    "upgraded": state_upgraded,
+    "absent": state_absent,
+}
 
 
 def main():
@@ -220,13 +575,10 @@ def main():
             state=dict(
                 type="str",
                 required=True,
-                choices=[
-                    "downloaded", "private_download", "imported",
-                    "verified", "installed", "upgraded", "absent",
-                ],
+                choices=list(STATE_HANDLERS.keys()),
             ),
             location=dict(type="str"),
-            reboot_delay=dict(type="int"),
+            reboot_delay=dict(type="int", default=30),
             uninstall_method=dict(
                 type="str",
                 choices=["completely", "last_take"],
@@ -245,11 +597,8 @@ def main():
 
     params = module.params
     client = DaCliClient(module, timeout=params["timeout"])
-    poll_interval = params["poll_interval"]
-    timeout = params["timeout"]
     state = params["state"]
     package_name = params["name"]
-    auto_selected = False
 
     result = {
         "changed": False,
@@ -257,21 +606,21 @@ def main():
     }
 
     try:
-        # --- Auto-detect package name if not provided ---
+        # Auto-detect package name if not provided
         if not package_name and state in ("downloaded", "verified", "installed"):
             if params["refresh"] and not module.check_mode:
                 client.check_for_updates(timeout=params["timeout"])
-                # Mark refresh done so we don't do it twice
                 params["refresh"] = False
 
             package_name = find_recommended_jumbo(client)
+
             if not package_name:
                 module.fail_json(
                     msg="No package name provided and could not auto-detect "
                         "Recommended Jumbo HFA (no uninstalled package with "
                         "tag.importance=='latest' and category=='jumbo' found)"
                 )
-            auto_selected = True
+
             result["auto_selected"] = True
 
         if not package_name:
@@ -279,317 +628,18 @@ def main():
 
         result["package"] = package_name
 
-        # --- Optional refresh ---
+        # Optional refresh
         if params["refresh"] and not module.check_mode:
             client.check_for_updates(timeout=params["timeout"])
 
-        # --- Get current package state for idempotency ---
+        # Get current package state for idempotency
         current = get_package_state(client, package_name)
-        current_state = current.get("state", "unknown") if current else "unknown"
+        _pkg_state = normalize_pkg_state(current)
 
-        # =====================================================
-        # STATE: downloaded
-        # =====================================================
-        if state == "downloaded":
-            # isInRepository indicates the package file is locally available
-            if current and (current.get("isInRepository") or
-                           current_state in ("downloaded", "installed")):
-                result["status"] = "already_downloaded"
-                result["changed"] = False
-            elif module.check_mode:
-                result["status"] = "would_download"
-                result["changed"] = True
-            else:
-                action_result = client.run_action(
-                    f"download package={package_name}",
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                )
-                result.update(action_result)
-                result["changed"] = True
-
-        # =====================================================
-        # STATE: private_download
-        # =====================================================
-        elif state == "private_download":
-            # add_private_package downloads unpublished packages
-            # from Check Point's online repo by known name
-            if current and (current.get("isInRepository") or
-                           current_state in ("downloaded", "installed")):
-                result["status"] = "already_downloaded"
-                result["changed"] = False
-            elif module.check_mode:
-                result["status"] = "would_download_private"
-                result["changed"] = True
-            else:
-                action_result = client.run_action(
-                    f"add_private_package package={package_name}",
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                )
-                result.update(action_result)
-                result["changed"] = True
-
-        # =====================================================
-        # STATE: imported
-        # =====================================================
-        elif state == "imported":
-            if current and current.get("isInRepository"):
-                result["status"] = "already_in_repository"
-                result["changed"] = False
-            elif module.check_mode:
-                result["status"] = "would_import"
-                result["changed"] = True
-            else:
-                location = params["location"]
-                action_result = client.run_action(
-                    f"import package={package_name} location={location}",
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                )
-                result.update(action_result)
-                result["changed"] = True
-
-        # =====================================================
-        # STATE: verified
-        # =====================================================
-        elif state == "verified":
-            if module.check_mode:
-                result["status"] = "would_verify"
-                result["changed"] = False  # verify is non-destructive
-            else:
-                cmd = f"verify package={package_name}"
-                if params["role"]:
-                    cmd += f" role={params['role']}"
-
-                action_result = client.run_action(
-                    cmd,
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                )
-                result.update(action_result)
-                # Verify doesn't change state; it's informational
-                result["changed"] = False
-
-                # Extract embedded verify JSON from Message
-                msg = action_result.get("message", "")
-                if isinstance(msg, dict):
-                    result["verify_details"] = msg
-                elif isinstance(msg, str) and msg:
-                    try:
-                        result["verify_details"] = json.loads(msg)
-                    except (json.JSONDecodeError, TypeError):
-                        result["verify_details"] = {"raw": msg}
-
-        # =====================================================
-        # STATE: installed
-        # =====================================================
-        elif state == "installed":
-            if current and current_state == "installed":
-                result["status"] = "already_installed"
-                result["changed"] = False
-            elif module.check_mode:
-                result["status"] = "would_install"
-                result["changed"] = True
-            else:
-                # Step 1: Verify (if requested)
-                if params["verify_before_install"]:
-                    verify_cmd = f"verify package={package_name}"
-                    if params["role"]:
-                        verify_cmd += f" role={params['role']}"
-
-                    try:
-                        verify_result = client.run_action(
-                            verify_cmd,
-                            poll_interval=poll_interval,
-                            timeout=timeout,
-                        )
-                    except DaCliError as ve:
-                        # Verify can "fail" if package is already installed
-                        # (message-code DEPENDENCY). Check for this case.
-                        # Re-query package state to confirm.
-                        recheck = get_package_state(client, package_name)
-                        if recheck and recheck.get("state") == "installed":
-                            result["status"] = "already_installed"
-                            result["changed"] = False
-                            module.exit_json(**result)
-                        raise  # Real failure, propagate
-
-                    # Parse verify Message for install applicability
-                    msg = verify_result.get("message", "")
-                    verify_details = {}
-                    if isinstance(msg, dict):
-                        verify_details = msg
-                    elif isinstance(msg, str) and msg:
-                        try:
-                            verify_details = json.loads(msg)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    result["verify_details"] = verify_details
-
-                    # Check if install is applicable
-                    # For Jumbo HFA packages, install.applicable is the
-                    # relevant flag. For version upgrade packages,
-                    # install.applicable will be false — those use
-                    # state=upgraded which checks upgrade.applicable instead.
-                    install_info = verify_details.get("install", {})
-                    if install_info and not install_info.get("applicable"):
-                        # Check if already installed (DEPENDENCY)
-                        msgs = install_info.get("messages", []) or []
-                        already_installed = any(
-                            m.get("message-code") == "DEPENDENCY"
-                            for m in msgs
-                        )
-                        if already_installed:
-                            result["status"] = "already_installed"
-                            result["changed"] = False
-                            module.exit_json(**result)
-
-                        module.fail_json(
-                            msg="Package verification indicates install "
-                                "is not applicable",
-                            verify_details=verify_details,
-                        )
-
-                    # Surface install warnings if present
-                    warning_install = verify_details.get(
-                        "warning-install", {}
-                    )
-                    if (warning_install.get("applicable") and
-                            warning_install.get("messages")):
-                        result["warnings"] = [
-                            m.get("text", "")
-                            for m in warning_install["messages"]
-                            if m.get("text")
-                        ]
-
-                # Step 2: Install
-                install_cmd = f"install package={package_name}"
-                if params["reboot_delay"] is not None:
-                    install_cmd += f" reboot_delay={params['reboot_delay']}"
-
-                action_result = client.run_action(
-                    install_cmd,
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                )
-                result.update(action_result)
-                result["changed"] = True
-
-        # =====================================================
-        # STATE: upgraded
-        # =====================================================
-        elif state == "upgraded":
-            if module.check_mode:
-                result["status"] = "would_upgrade"
-                result["changed"] = True
-            else:
-                # Verify first if requested
-                if params["verify_before_install"]:
-                    verify_cmd = f"verify package={package_name}"
-                    if params["role"]:
-                        verify_cmd += f" role={params['role']}"
-
-                    verify_result = client.run_action(
-                        verify_cmd,
-                        poll_interval=poll_interval,
-                        timeout=timeout,
-                    )
-
-                    msg = verify_result.get("message", "")
-                    verify_details = {}
-                    if isinstance(msg, dict):
-                        verify_details = msg
-                    elif isinstance(msg, str) and msg:
-                        try:
-                            verify_details = json.loads(msg)
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    result["verify_details"] = verify_details
-
-                    upgrade_info = verify_details.get("upgrade", {})
-                    if upgrade_info and not upgrade_info.get("applicable"):
-                        module.fail_json(
-                            msg="Package verification indicates upgrade "
-                                "is not applicable",
-                            verify_details=verify_details,
-                        )
-
-                    # Surface upgrade warnings if present
-                    warning_upgrade = verify_details.get(
-                        "warning-upgrade", {}
-                    )
-                    if (warning_upgrade.get("applicable") and
-                            warning_upgrade.get("messages")):
-                        result["warnings"] = [
-                            m.get("text", "")
-                            for m in warning_upgrade["messages"]
-                            if m.get("text")
-                        ]
-
-                # Upgrade: uses is_upgrade=True to handle the
-                # reboot-during-progress quirk where Status stays
-                # "in progress" at Progress 100, system reboots,
-                # Progress drops back, then climbs to 100 again.
-                # This needs a much longer timeout than install.
-                upgrade_cmd = f"upgrade package={package_name}"
-                if params["reboot_delay"] is not None:
-                    upgrade_cmd += f" reboot_delay={params['reboot_delay']}"
-
-                action_result = client.run_action(
-                    upgrade_cmd,
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                    is_upgrade=True,
-                )
-                result.update(action_result)
-                result["changed"] = True
-
-        # =====================================================
-        # STATE: absent
-        # =====================================================
-        elif state == "absent":
-            if not current:
-                result["status"] = "not_present"
-                result["changed"] = False
-            elif current_state == "installed":
-                # Uninstall first
-                if module.check_mode:
-                    result["status"] = "would_uninstall"
-                    result["changed"] = True
-                else:
-                    uninstall_cmd = f"uninstall package={package_name}"
-                    if params["reboot_delay"] is not None:
-                        uninstall_cmd += (
-                            f" reboot_delay={params['reboot_delay']}"
-                        )
-                    if params["uninstall_method"]:
-                        uninstall_cmd += (
-                            f" method={params['uninstall_method']}"
-                        )
-
-                    action_result = client.run_action(
-                        uninstall_cmd,
-                        poll_interval=poll_interval,
-                        timeout=timeout,
-                    )
-                    result.update(action_result)
-                    result["changed"] = True
-            else:
-                # Package exists but isn't installed; delete from repo
-                if module.check_mode:
-                    result["status"] = "would_delete"
-                    result["changed"] = True
-                else:
-                    action_result = client.run_action(
-                        f"delete package={package_name}",
-                        poll_interval=poll_interval,
-                        timeout=timeout,
-                    )
-                    result.update(action_result)
-                    result["changed"] = True
+        # Dispatch to state handler
+        result.update(
+            STATE_HANDLERS[state](module, client, params, package_name, current, _pkg_state)
+        )
 
     except DaCliError as e:
         module.fail_json(msg=str(e), package=package_name)
