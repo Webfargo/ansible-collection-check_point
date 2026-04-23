@@ -290,7 +290,7 @@ class DaCliClient:
         Tries DABuildNumber from da_status first (available in newer
         DA builds), falls back to `dbget installer:da_build` for
         older versions that don't include it. Never uses get_version,
-        which returns a useless static "1".
+        which returns a static "1".
         """
         status = self.get_da_status()
         build = status.get("DABuildNumber")

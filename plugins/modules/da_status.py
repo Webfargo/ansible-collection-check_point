@@ -12,7 +12,7 @@ description:
   - Query the Deployment Agent (da_cli) for service status, build
     number, and pending reboot state.
   - The DA build number comes from C(da_status) (the C(DABuildNumber)
-    field), not from C(get_version) which returns a useless static "1".
+    field), not from C(get_version) which returns a static "1".
   - This is a read-only module that never makes changes.
 options:
   wait_for_ready:

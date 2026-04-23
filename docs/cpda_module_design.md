@@ -22,7 +22,7 @@
 - `da_status` — returns `Action ID: "0"`; agent state, build number, update progress
 - `packages_info [status=<filter>]` — returns JSON document directly (no Action ID); package list with `numberOfPackages` and `packages` array
 - `package_info package=<n>` — returns JSON document directly (no Action ID); single package object
-- `get_version` — **useless**, always returns `{"version": "1"}`; use `DABuildNumber` from `da_status` JSON output instead
+- `get_version` — always returns `{"version": "1"}`; use `DABuildNumber` from `da_status` JSON output instead
 - `get_status_of_action actionID=<id>` — poll action progress
 - `is_pending_reboot` — returns `{"Action ID": "0", "Message": "no reboot"}` (recent addition; untested in older builds)
 - `check_for_updates` — returns `Action ID: -1` but is actually **async**; must poll `da_status` `"Update Status"` until `"done"`
@@ -58,7 +58,9 @@
 
 **Key quirks:**
 - JSON keys use caps and spaces: `"Action ID"`, `"DAService State"`, `"Action Type"`
-- `"Action ID"` is a string, not an integer (Check Point's choice, not ours). It is safely convertible to `int` for arithmetic or comparison. The value `"-1"` is a sentinel meaning "not an action command" — not an error.
+- `"Action ID"` is a string, not an integer (Check Point's output).  It is
+  safely convertible to `int` for arithmetic or comparison.  The value
+  `"-1"` is a sentinel meaning "not an action command" — not an error.
 - `"Progress"` is a string percentage ("0" through "100"), but can also be
   an **empty string** `""` for some action types (e.g. delete). Code must
   handle this safely.
@@ -111,9 +113,9 @@ Then poll `da_status`:
 This means the module utils `check_for_updates` implementation cannot just
 fire-and-forget — it must poll `da_status` afterward.
 
-### get_version Is Useless
+### get_version
 
-`da_cli get_version` returns a meaningless static value:
+`da_cli get_version` always returns a static value:
 ```json
 {"Action ID": "0", "version": "1"}
 ```
@@ -269,7 +271,7 @@ as complete and return before the SSH connection drops.
 
 The signal persists for approximately 30-90 seconds before the actual reboot,
 depending on the `reboot_delay` value set on the da_cli command. **`reboot_delay`
-must be set** (minimum 30 seconds recommended) to guarantee at least one poll
+must be set** (30 seconds is the default and recommended) to guarantee at least one poll
 cycle captures the message before the host goes down.
 
 Real captured sequence for an install:
@@ -282,7 +284,7 @@ Real captured sequence for an install:
 
 ### Upgrade Reboot Quirk (Additional)
 
-**On top of** the general Progress/Status behavior, upgrade operations
+In addition to the general Progress/Status behavior, upgrade operations
 have an additional reboot complication:
 1. `Progress` reaches `"100"`, `Status` remains `"in progress"` (normal)
 2. `Status` becomes `"success"` or... the system **reboots** (upgrade-specific)
@@ -300,9 +302,9 @@ This means the polling logic for upgrades must:
 
 ### Package State Strings
 
-The `state` field in package info responses is a freeform human-readable string
-that is **inconsistent across package types and DA builds**. Do not use it for
-programmatic comparisons. Known values observed in production:
+The `state` field in package info responses is a freeform human-readable
+string to describe the package availability.  Known values observed in
+production:
 
 | Condition | `state` value |
 |---|---|
@@ -310,9 +312,9 @@ programmatic comparisons. Known values observed in production:
 | Downloaded, not installed | `"Available for Install"` |
 | Installed | `"Installed Successfully"` |
 
-Use `isInRepository` (boolean) for download status checks. For installed status,
-normalize the `state` string before comparing — the module uses
-`state.lower().startswith("installed")` to handle case variation.
+Use `isInRepository` (boolean) for reliable download status checks.  For
+installed status, normalize the `state` string before comparing — the module
+uses `state.lower().startswith("installed")` to handle case variation.
 
 ### Package Info Structure
 
@@ -364,8 +366,8 @@ normalize the `state` string before comparing — the module uses
   - `"jumbo"` — Jumbo HFA packages (any version, not just latest)
   - `"major"` — full version upgrade packages (e.g. R82 Install and Upgrade)
   - `"misc"` — miscellaneous packages (custom hotfixes, auto-installed tools)
-- `state` — human-readable status string. **Freeform and inconsistent** — see
-  Package State Strings section above. Never use for programmatic checks.
+- `state` — human-readable status string.  See Package State Strings section
+  above.  Not widely used for programmatic checks.
 - `isInRepository` — `false` when the package is known but not yet downloaded;
   becomes `true` after download completes. This is the reliable boolean for
   checking download status.
@@ -373,9 +375,9 @@ normalize the `state` string before comparing — the module uses
 - `children` / `parents` — package dependency chain between takes
 - `packageType` — e.g. `"Wrapper"` for Jumbo bundles, `"Major Version"` for upgrades
 - `product` — e.g. `"CPUpdates"` for Jumbos, `"Major"` for version upgrades
-- **`isHfa`** — **UNRELIABLE.** Despite the name, this is `false` even on
-  actual Jumbo HFA packages. Do not use for identification. Use
-  `tag.importance` and/or `category` instead.
+- **`isHfa`** — Despite the name, this is `false` even on actual Jumbo HFA
+  packages.  Do not use for identification.  Use `tag.importance` and/or
+  `category` instead.
 - Installed packages have additional keys: `installedOn`, `downloadedOn`,
   `installLogFile`, `build`
 
@@ -410,11 +412,10 @@ Note that both Jumbo HFA and major version packages can have
 Check Point uses two Jumbo HFA release trains:
 - **Recommended** — stable, production-ready. Identified by `category == "jumbo"`
   AND `tag.importance == "latest"` AND not yet installed (`installedOn` absent).
-  Despite the confusing naming, `tag.importance == "latest"` means "Recommended"
-  in Check Point's terminology.
-- **Latest** — public beta, next candidate release. Identified by
-  `category == "jumbo"` AND no `tag.importance` set AND not yet installed.
-  Not always available. If multiple candidates exist, select highest `build`.
+  Despite the naming, `tag.importance == "latest"` means "Recommended".
+- **Latest** — next candidate release.  Identified by `category == "jumbo"`
+  AND no `tag.importance` set AND not yet installed.  Not always available. 
+  If multiple candidates exist, select highest `build`.
 
 The `find_recommended_jumbo()` and `find_latest_jumbo()` helpers implement
 these filters. The `da_package_info` module exposes them via the
@@ -497,35 +498,37 @@ file was placed (directory only, not full file path).
 ansible-collection-check_point/
 ├── galaxy.yml
 ├── README.md
-├── plugins/
-│   ├── module_utils/
-│   │   └── da_cli.py                  # Shared CLI execution & JSON handling
-│   └── modules/
-│       ├── da_status.py           # da_status, build number, is_pending_reboot
-│       ├── da_package_info.py     # packages_info, package_info
-│       ├── da_package.py          # download/import/verify/install/uninstall/delete
-│       └── da_command.py          # Low-level: run arbitrary da_cli commands
-├── roles/
-│   ├── gather_facts/                  # existing ckp_gather_facts role
-│   └── cpda/                          # optional: thin workflow role using modules
+└── plugins/
+    ├── module_utils/
+    │   └── da_cli.py                  # Shared CLI execution & JSON handling
+    └── modules/
+        ├── da_status.py           # da_status, build number, is_pending_reboot
+        ├── da_package_info.py     # packages_info, package_info
+        ├── da_package.py          # download/import/verify/install/uninstall/delete
+        └── da_command.py          # Low-level: run arbitrary da_cli commands
 ```
 
 ### Module Utils: `da_cli.py`
 
-The core shared library — all modules import `DaCliClient` and `DaCliError` from here.
-Handles CLI execution, JSON parsing (including key normalization and embedded-JSON-in-Message),
-action polling, and all da_cli behavioral quirks.
+The core shared library — all modules import `DaCliClient` and `DaCliError`
+from here.  Handles CLI execution, JSON parsing (including key normalization
+and embedded-JSON-in-Message), action polling, and all da_cli behavioral
+quirks.
 
 **Key responsibilities:**
 - `run()` — execute any da_cli subcommand, parse JSON, normalize keys
-- `poll_action()` — poll `get_status_of_action` until completion; handles Progress/Status
-  quirks, reboot-imminent detection, and upgrade SSH-drop recovery
+- `poll_action()` — poll `get_status_of_action` until completion; handles
+  Progress/Status quirks, reboot-imminent detection, and upgrade SSH-drop
+  recovery
 - `run_action()` — convenience wrapper combining `run()` + `poll_action()`
-- `check_for_updates()` — fires the command and polls `da_status` until Update Status returns to `"done"`
-- `find_recommended_jumbo()` / `find_latest_jumbo()` — package auto-detection helpers
-- `_is_reboot_imminent()` — detects reboot-imminent message strings by action type
+- `check_for_updates()` — fires the command and polls `da_status` until
+  Update Status returns to `"done"`
+- `find_recommended_jumbo()` / `find_latest_jumbo()` — package
+  auto-detection helpers
+- `_is_reboot_imminent()` — detects reboot-imminent message strings by
+  action type
 
-### Module 1: `da_status`
+### Module: `da_status`
 
 Read-only module for agent status, build number, and reboot state.
 
@@ -535,7 +538,7 @@ Read-only module for agent status, build number, and reboot state.
 **Options:** `wait_for_ready` (bool) — poll until DA is idle before returning.
 `timeout` (int, default 120).
 
-### Module 2: `da_package_info`
+### Module: `da_package_info`
 
 Read-only module for querying the package catalog.
 
@@ -547,7 +550,7 @@ Read-only module for querying the package catalog.
 
 **Returns:** `package` (dict) or `packages` (list), `found` (bool), `count` (int)
 
-### Module 3: `da_package`
+### Module: `da_package`
 
 The main workhorse — all state-changing package operations with built-in polling
 and idempotency.
@@ -568,7 +571,7 @@ and idempotency.
 - `refresh` (bool) — run `check_for_updates` before the operation
 - `poll_interval` (int, default 15) / `timeout` (int, default 900)
 
-### Module 4: `da_command`
+### Module: `da_command`
 
 Low-level escape hatch for any `da_cli` subcommand not covered by the other modules.
 
@@ -582,55 +585,7 @@ Use `da_package` with `refresh: true` or `da_status` to monitor update completio
 
 ---
 
-## Playbook Comparison
-
-### Before: Role Approach (Conceptual)
-
-```yaml
-# This is approximately what the role's tasks/main.yml does
-# via shell/raw commands + register + json_query + set_fact
-
-- name: Check for updates
-  raw: da_cli check_for_updates
-  register: _cfu_result
-
-- name: Get packages info
-  raw: da_cli packages_info
-  register: _pkg_info_raw
-
-- name: Parse packages
-  set_fact:
-    _packages: "{{ _pkg_info_raw.stdout | from_json }}"
-
-- name: Find latest jumbo
-  set_fact:
-    _jumbo_package: >-
-      {{ _packages.packages
-         | selectattr('tag', 'defined')
-         | selectattr('tag.importance', 'eq', 'latest')
-         | first }}
-  when: cpda_package is not defined
-
-- name: Download package
-  raw: "da_cli download package={{ _target_package }}"
-  register: _download_result
-
-- name: Parse download action ID
-  set_fact:
-    _download_action_id: "{{ (_download_result.stdout | from_json)['Action ID'] }}"
-
-- name: Wait for download to complete
-  raw: "da_cli get_status_of_action actionID={{ _download_action_id }}"
-  register: _download_status
-  until: (_download_status.stdout | from_json).Status == 'success'
-  retries: 60
-  delay: 15
-
-# ... repeat for verify, install ...
-# ... lots of YAML, fragile parsing, complex until/retries ...
-```
-
-### After: Module Approach
+## Playbook
 
 ```yaml
 - name: Install latest Jumbo HFA
@@ -639,7 +594,7 @@ Use `da_package` with `refresh: true` or `da_status` to monitor update completio
 
   tasks:
     - name: Install Recommended Jumbo HFA
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         state: installed
         refresh: true
         timeout: 1800
@@ -659,7 +614,7 @@ Or for a more controlled, step-by-step workflow:
 
   tasks:
     - name: Find Recommended Jumbo HFA
-      company.check_point.da_package_info:
+      webfargo.check_point.da_package_info:
         jumbo: recommended
         refresh: true
       register: jumbo
@@ -674,12 +629,12 @@ Or for a more controlled, step-by-step workflow:
         msg: "Installing {{ jumbo.package.displayName }} ({{ jumbo.package.filename }})"
 
     - name: Download package
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ jumbo.package.filename }}"
         state: downloaded
 
     - name: Verify package
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ jumbo.package.filename }}"
         state: verified
       register: verify
@@ -689,7 +644,7 @@ Or for a more controlled, step-by-step workflow:
         var: verify.verify_details
 
     - name: Install package
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ jumbo.package.filename }}"
         state: installed
         verify_before_install: false  # already verified above
@@ -713,7 +668,7 @@ Or for a more controlled, step-by-step workflow:
             timeout: 600
 
     - name: Check DA status post-install
-      company.check_point.da_status:
+      webfargo.check_point.da_status:
       register: post_status
 ```
 
@@ -726,22 +681,22 @@ Or for a more controlled, step-by-step workflow:
 
   vars:
     hotfix_file: "custom_hotfix_HF999.tgz"
-    hotfix_src: "/opt/ansible_shared/files/hotfixes/{{ hotfix_file }}"
+    hotfix_src: "/opt/files/hotfixes/{{ hotfix_file }}"
 
   tasks:
     - name: Copy hotfix to host
-      copy:
+      ansible.builtin.copy:
         src: "{{ hotfix_src }}"
-        dest: "/var/tmp/{{ hotfix_file }}"
+        dest: "/var/log/{{ hotfix_file }}"
 
     - name: Import into DA repository
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ hotfix_file }}"
         state: imported
-        location: /var/tmp
+        location: /var/log
 
     - name: Verify and install
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ hotfix_file }}"
         state: installed
         timeout: 1200
@@ -778,7 +733,7 @@ does not need to trigger it.
 
 ```yaml
     - name: Install latest Jumbo HFA
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         state: installed
         refresh: true
         timeout: 1800
@@ -825,33 +780,33 @@ but use generous timeouts and handle potential SSH key changes:
 
   tasks:
     - name: Copy upgrade package
-      copy:
+      ansible.builtin.copy:
         src: "/opt/ansible_shared/files/upgrades/{{ upgrade_package }}"
         dest: "/var/tmp/{{ upgrade_package }}"
 
     - name: Import upgrade package
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ upgrade_package }}"
         state: imported
         location: /var/tmp
 
     - name: Verify upgrade eligibility
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ upgrade_package }}"
         state: verified
       register: verify
 
     - name: Show upgrade warnings
-      debug:
+      ansible.builtin.debug:
         var: verify.warnings
       when: verify.warnings is defined
 
     - name: Confirm upgrade
-      pause:
+      ansible.builtin.pause:
         prompt: "Proceed with upgrade? (Ctrl+C to abort)"
 
     - name: Execute upgrade
-      company.check_point.da_package:
+      webfargo.check_point.da_package:
         name: "{{ upgrade_package }}"
         state: upgraded
         verify_before_install: false  # already verified
@@ -877,13 +832,13 @@ but use generous timeouts and handle potential SSH key changes:
 
     # SSH host key may have changed after upgrade
     - name: Remove stale SSH host key
-      known_hosts:
+      ansible.builtin.known_hosts:
         name: "{{ ansible_host }}"
         state: absent
       delegate_to: localhost
 
     - name: Verify post-upgrade status
-      company.check_point.da_status:
+      webfargo.check_point.da_status:
       register: post_upgrade
 ```
 
@@ -891,21 +846,20 @@ but use generous timeouts and handle potential SSH key changes:
 
 ## Known Limitations & Edge Cases
 
-**DA build version compatibility:** Not all hosts run the same DA build version,
-and certain packages require a minimum DA build to import or install. The DA
-does not auto-update itself (that's a separate mechanism outside scope). If a
-package is incompatible with the host's DA version, it may fail to import or
-may simply not appear in `packages_info` results at all. There is no reliable
-programmatic way to check compatibility — it may be logged, but the log format
-isn't stable enough to parse. The modules do not attempt to detect or handle
-this; if you hit it, the action will fail with whatever error `da_cli` returns
-and the module will surface that message.
+**DA build version compatibility:** Not all hosts run the same DA build
+version, and certain packages require a minimum DA build to import or
+install.  If a package is incompatible with the host's DA version, it may
+fail to import or may simply not appear in `packages_info` results at all. 
+There is no reliable programmatic way to check compatibility — it may be
+logged, but the log format isn't stable enough to parse.  The modules do not
+attempt to detect or handle this; if you hit it, the action will fail with
+whatever error `da_cli` returns and the module will surface that message.
 
-**`show_progress`:** Reads from a semaphore file written by another process.
+**`show_progress`:** Reads from a semaphore file written by another process. 
 Not useful for automation; `get_status_of_action` is the correct polling
 mechanism.
 
-**`get_version`:** Always returns `{"version": "1"}`. Useless. Use
+**`get_version`:** Always returns `{"version": "1"}`.  Use
 `get_build_number()` which falls back through `da_status` → `dbget`.
 
 **`is_pending_reboot`:** Recent addition to `da_cli`. May not exist on older
@@ -943,7 +897,7 @@ already installed — this is an idempotency signal, not an actual error.
 
 **`wait_for_connection` vs `wait_for` for reboot handling:** Use
 `ansible.builtin.wait_for_connection` — not `ansible.builtin.wait_for` with
-`delegate_to: localhost`. The latter runs on the Ansible controller and may
-not have network access to gateway management IPs. `wait_for_connection`
-executes in the context of the target host's connection, using the same
-addressing and credentials as all other tasks.
+`delegate_to: localhost`.  The latter runs on the Ansible controller and
+does not target the host.  `wait_for_connection` executes in the context of
+the target host's connection, using the same addressing and credentials as
+all other tasks.

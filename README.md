@@ -6,7 +6,7 @@ Ansible modules for managing Check Point Gaia OS infrastructure:
 
 ## Requirements
 
-- Ansible 2.14+
+- Ansible 2.15+
 - Python 3.9+ on control node
 - Python 3.x on managed Check Point hosts (typically symlinked at `/usr/bin/python3`)
 - SSH access to managed hosts
@@ -15,23 +15,6 @@ Ansible modules for managing Check Point Gaia OS infrastructure:
 
 ```bash
 ansible-galaxy collection install webfargo-check_point-<version>.tar.gz
-```
-
-Or clone directly into your collections path:
-
-```
-webfargo/
-  check_point/
-    galaxy.yml
-    plugins/
-      module_utils/
-        da_cli.py
-      modules/
-        gather_facts.py
-        da_status.py
-        da_package_info.py
-        da_package.py
-        da_command.py
 ```
 
 ## Modules
@@ -48,6 +31,7 @@ collects the following facts:
 - VSX status
 - Cluster/HA status
 - Hardware platform
+- OS code name and build number
 
 ```yaml
 - name: Gather all Check Point facts - ansible_facts
@@ -83,7 +67,9 @@ Read-only module for Deployment Agent status, build number, and pending reboot s
     msg: "DA build {{ da.build_number }}, ready: {{ da.ready }}"
 ```
 
-Includes `wait_for_ready` option to poll until the agent is fully idle before starting operations. When a reboot is pending, returns `pending_reboot_message` and `pending_reboot_package` with details.
+Includes `wait_for_ready` option to poll until the agent is fully idle
+before starting operations.  When a reboot is pending, returns
+`pending_reboot_message` and `pending_reboot_package` with details.
 
 ### `da_package_info`
 
@@ -122,11 +108,15 @@ Query available and installed packages from the Deployment Agent repository.
   register: pkg
 ```
 
-The `jumbo`, `category`, `status`, and `name` parameters are mutually exclusive. The `jumbo` parameter provides smart selection of Jumbo HFA packages by release train; see **Jumbo HFA Release Trains** below.
+The `jumbo`, `category`, `status`, and `name` parameters are mutually
+exclusive.  The `jumbo` parameter provides smart selection of Jumbo HFA
+packages by release train; see **Jumbo HFA Release Trains** below.
 
 ### `da_package`
 
-State-driven package management — the primary workhorse module. Handles download, import, verify, install, upgrade, and delete operations with built-in async polling.
+State-driven package management — the primary workhorse module.  Handles
+download, import, verify, install, upgrade, and delete operations with
+built-in async polling.
 
 ```yaml
 # Install Recommended Jumbo HFA (auto-detect, download, verify, install)
@@ -160,11 +150,15 @@ State-driven package management — the primary workhorse module. Handles downlo
     timeout: 3600
 ```
 
-Supported states: `downloaded`, `private_download`, `imported`, `verified`, `installed`, `upgraded`, `absent`.
+Supported states: `downloaded`, `private_download`, `imported`, `verified`,
+`installed`, `upgraded`, `absent`.
 
 #### Private Package Download
 
-The `private_download` state uses `da_cli add_private_package` to download unpublished packages from Check Point's online repository. These are packages that don't appear in public package listings but are known by name — typically hotfixes or patches obtained through a TAC case.
+The `private_download` state uses `da_cli add_private_package` to download
+unpublished packages from Check Point's online repository.  These are
+packages that don't appear in public package listings but are known by name
+— typically hotfixes or patches obtained through a TAC case.
 
 ```yaml
 - webfargo.check_point.da_package:
@@ -177,11 +171,14 @@ The `private_download` state uses `da_cli add_private_package` to download unpub
     reboot_delay: 60
 ```
 
-The package name must be known in advance. This is distinct from `downloaded` which pulls from the public repository.
+The package name must be known in advance.  This is distinct from
+`downloaded` which pulls from the public repository.
 
 #### Typical Jumbo HFA Workflow
 
-A single `state: installed` task handles verify and install, but the package must already be in the local repository. For a complete workflow that ensures the package is available:
+A single `state: installed` task handles verify and install, but the package
+must already be in the local repository.  For a complete workflow that
+ensures the package is available:
 
 ```yaml
 - name: Find Recommended Jumbo HFA
@@ -208,11 +205,13 @@ A single `state: installed` task handles verify and install, but the package mus
     timeout: 1800
 ```
 
-Each task is idempotent — `downloaded` is a no-op if the package is already in the local repository, and `installed` is a no-op if already installed.
+Each task is idempotent — `downloaded` is a no-op if the package is already
+in the local repository, and `installed` is a no-op if already installed.
 
 ### `da_command`
 
-Escape hatch for arbitrary `da_cli` subcommands not covered by the other modules.
+Escape hatch for arbitrary `da_cli` subcommands not covered by the other
+modules.
 
 ```yaml
 - webfargo.check_point.da_command:
@@ -225,22 +224,31 @@ Escape hatch for arbitrary `da_cli` subcommands not covered by the other modules
 
 ### `da_cli.py`
 
-Shared library providing the `DaCliClient` class used by all `da_*` modules. Handles JSON parsing, key normalization, embedded message extraction, async action polling, and the various `da_cli` behavioral quirks:
+Shared library providing the `DaCliClient` class used by all `da_*` modules. 
+Handles JSON parsing, key normalization, embedded message extraction, async
+action polling, and the various `da_cli` behavioral quirks:
 
 - Progress 100 does not mean done — always waits for Status to change
 - Progress can be an empty string (e.g. during delete operations)
 - `check_for_updates` returns Action ID -1 but is actually async
 - Upgrade operations reboot mid-progress and resume with the same Action ID
-- `get_version` is useless; build number comes from `da_status` or `dbget`
+- `get_version` is not useful; build number comes from `da_status` or `dbget`
 - Verify "failure" with message-code DEPENDENCY means already installed
 
 ## Jumbo HFA Release Trains
 
 Check Point publishes Jumbo HFA updates on two release trains:
 
-**Recommended** — the stable, production-ready release. Check Point internally marks this with `tag.importance == "latest"` in the package metadata (confusing, but that is their convention). Select with `jumbo: recommended`.
+**Recommended** — the stable, production-ready release.  Check Point
+internally marks this with `tag.importance == "latest"` in the package
+metadata (confusing, but that is their convention).  Select with `jumbo:
+recommended`.
 
-**Latest** — effectively a public beta. The next package that may eventually become the Recommended release. These packages have `category == "jumbo"` but no `tag.importance` set. Not always available — there may be no Latest package between Recommended releases. Select with `jumbo: latest`.
+**Latest** — effectively a public beta.  The next package that may
+eventually become the Recommended release.  These packages have 
+`category == "jumbo"` but no `tag.importance` set.  Not always available —
+there may be no Latest package between Recommended releases.  Select with
+`jumbo: latest`.
 
 Package categories returned by the Deployment Agent:
 
@@ -256,11 +264,17 @@ The `isHfa` field on package objects is unreliable (can be `false` on actual Jum
 
 ### Check Point Environment
 
-Commands that interact with Check Point binaries (`cpprod_util`, `fw stat`, `cpinfo`, etc.) require the Check Point shell environment. The `gather_facts` module handles this by sourcing `/etc/profile.d/CP.sh` before command execution (configurable via `cp_env_script`). The `da_cli` binary does not require this.
+Commands that interact with Check Point binaries (`cpprod_util`, `fw stat`,
+`cpinfo`, etc.) require the Check Point shell environment.  The
+`gather_facts` module handles this by sourcing `/etc/profile.d/CP.sh` before
+command execution (configurable via `cp_env_script`).  The `da_cli` binary
+does not require this.
 
 ### Python Interpreter on Check Point Hosts
 
-Check Point hosts typically have `/usr/bin/python3` symlinked to the Check Point Python installation. If this is not the case, set the interpreter in inventory or use a pre_task:
+Check Point hosts typically have `/usr/bin/python3` symlinked to the Check
+Point Python installation.  If this is not the case, set the interpreter in
+inventory or use a pre_task:
 
 ```yaml
 # In group_vars/firewalls.yml
@@ -271,25 +285,16 @@ ansible_python_interpreter: /opt/CPsuite-R82/fw1/Python/bin/python3
     - webfargo.check_point.gather_facts:
   rescue:
     - set_fact:
-        ansible_python_interpreter: "/opt/CPsuite-{{ ckp_ver | upper }}/fw1/Python/bin/python3"
+        ansible_python_interpreter: "/opt/CPsuite-{{ chkp_ver | upper }}/fw1/Python/bin/python3"
     - webfargo.check_point.gather_facts:
 ```
 
 ### DA Version Compatibility
 
-Not all hosts run the same DA build. Certain packages require a minimum DA build to import or install. The DA does not auto-update itself. There is no reliable programmatic compatibility check; the modules surface whatever error `da_cli` returns.
-
-## Version History
-
-### 0.1.0
-
-- Initial release
-- `gather_facts` module
-- `da_status` module
-- `da_package_info` module
-- `da_package` module
-- `da_command` module
-- `da_cli.py` shared module utils
+Not all hosts run the same DA build.  Certain packages require a minimum DA
+build to import or install.  The DA does not auto-update itself.  There is
+no reliable programmatic compatibility check; the modules surface whatever
+error `da_cli` returns.
 
 ## License
 
