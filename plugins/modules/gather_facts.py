@@ -26,7 +26,8 @@ options:
       - Individual subsets can be specified to limit collection.
     type: list
     elements: str
-    choices: [all, sic, host_type, policy, hotfixes, take, vsx, cluster, hardware]
+    choices: [all, sic, host_type, policy, hotfixes, take, vsx, version,
+              cpda, take, cluster, hardware]
     default: [all]
   set_ansible_facts:
     description:
@@ -86,6 +87,12 @@ facts:
     cluster:
       description: Whether host is a cluster (HA) member
       type: bool
+    cpda:
+      description: Build number of Gaia Deployment Agent
+      type: int
+    cpsnmpd:
+      description: Whether Check Point SNMP daemon is enabled
+      type: bool
     hardware:
       description: Hardware platform information
       type: dict
@@ -104,6 +111,9 @@ facts:
     take:
       description: OS code name and build take number
       type: dict
+    version:
+      description: Version of Check Point software
+      type: str
     vsx:
       description: Whether host is a VSX gateway
       type: bool
@@ -293,33 +303,6 @@ class CkpFactsCollector:
 
         return {"raw": stdout.strip()}
 
-    # ----- Hotfix / JHF Facts -----
-    def gather_take_info(self):
-        """
-        Parse output of take.info command for build code name and take number
-
-        Example output for R81.20:
-            ivory_main;631
-        """
-        rc, stdout, stderr = self._run("cat /sysimg/CPwrapper/linux/MiniWrapper/take.info")
-
-        if rc != 0 or not stdout.strip():
-            return {"error" : "take.info failed"}
-
-        m = re.search(
-            r'([^;]+);(\S+)',
-            stdout,
-        )
-
-        if m:
-            return {
-                "code_name"   : m.group(1),
-                "take"        : m.group(1),
-                "take_info"   : stdout.strip(),
-            }
-
-        return {"raw" : stdout.strip() }
-
     def gather_hotfixes(self):
         """
         Parse cpinfo -y all output for installed hotfixes and JHF takes.
@@ -402,6 +385,43 @@ class CkpFactsCollector:
         """Check if host is a VSX gateway."""
         return self._run_cpprod_util("FwIsVSX")
 
+    # ----- Version Facts -----
+
+    def gather_version(self):
+        """Checks for product version
+
+        Returns single line output: R81.20, R82, etc.
+        """
+        rc, stdout, stderr = self._run(
+            "cpprod_util CPPROD_GetValue CPshared CurrentLabel 1"
+        )
+
+        if rc != 0 or not stdout.strip():
+            return "Unknown"
+
+        return stdout.strip()
+
+    # ----- Take Facts -----
+
+    def gather_take(self):
+        """Checks for product version
+
+        Returns single line output: R81.20, R82, etc.
+        """
+        rc, stdout, stderr = self._run(
+            "cat /sysimg/CPwrapper/linux/MiniWrapper/take.info"
+        )
+
+        if rc != 0 or not stdout.strip():
+            return {"error" : "take.info failed"}
+
+        parts = stdout.strip().split(';')
+        return {
+            "take" : parts[1] if len(parts) > 1 else "unknown",
+            "name" : parts[0] if len(parts) > 1 else "unknown",
+            "take_info" : stdout.strip()
+        }
+
     # ----- Cluster Facts -----
 
     def gather_cluster(self):
@@ -423,10 +443,10 @@ class CkpFactsCollector:
         )
 
         if rc != 0 or not stdout.strip():
-            return {"cpda_build" : 0}
+            return {"build" : 0}
 
         return {
-            "cpda_build" : stdout.strip()
+            "build" : stdout.strip()
         }
 
     # ----- Hardware Facts -----
@@ -525,10 +545,13 @@ def main():
         facts["hotfixes"] = collector.gather_hotfixes()
 
     if collect_all or "take" in subset:
-        facts["take"] = collector.gather_take_info()
+        facts["take"] = collector.gather_take()
 
     if collect_all or "vsx" in subset:
         facts["vsx"] = collector.gather_vsx()
+
+    if collect_all or "version" in subset:
+        facts["version"] = collector.gather_version()
 
     if collect_all or "cluster" in subset:
         facts["cluster"] = collector.gather_cluster()
