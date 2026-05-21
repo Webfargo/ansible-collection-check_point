@@ -9,17 +9,17 @@ description: >-
   Check Point Gaia OS automation modules for the Deployment Agent (da_cli),
   facts gathering, and related operations.
 license:
-  - GPL-2.0-or-later
+  - GPL-3.0-or-later
 tags:
   - check_point
   - firewall
   - gaia
   - deployment
   - cpda
-repository: ""
-documentation: ""
-homepage: ""
-issues: ""
+repository: "https://github.com/Webfargo/ansible-collection-check_point.git"
+documentation: "https://github.com/Webfargo/ansible-collection-check_point/blob/main/README.md"
+homepage: "https://github.com/Webfargo/ansible-collection-check_point.git"
+issues: "https://github.com/Webfargo/ansible-collection-check_point/issues"
 build_ignore:
   - "*.tar.gz"
   - ".git"

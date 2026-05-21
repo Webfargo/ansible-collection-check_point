@@ -11,10 +11,42 @@ Ansible modules for managing Check Point Gaia OS infrastructure:
 - Python 3.x on managed Check Point hosts (typically symlinked at `/usr/bin/python3`)
 - SSH access to managed hosts
 
+## Compatibility
+
+| Check Point Version | ansible-core | ansible (community) |
+|---------------------|--------------|---------------------|
+| R81.20 and earlier  | ≤ 2.16       | ≤ 9.x               |
+| R82 and later       | ≥ 2.17       | ≥ 10.x              |
+
+> **Note:** This collection connects to Check Point hosts via SSH and executes
+> commands using the remote Python interpreter. Ansible 2.17 raised the minimum
+> remote Python requirement, which is not met by the Python version shipped with
+> R81.20 and earlier. You will see Python-related SSH connection failures if the
+> versions are mismatched.
+
 ## Installation
 
+### Using requirements.yml (recommended)
+
+Add to your `requirements.yml`:
+
+```yaml
+collections:
+  - name: https://github.com/Webfargo/ansible-collection-check_point.git
+    type: git
+    version: main
+```
+
+Then install:
+
 ```bash
-ansible-galaxy collection install webfargo-check_point-<version>.tar.gz
+ansible-galaxy collection install -r requirements.yml
+```
+
+### Direct install
+
+```bash
+ansible-galaxy collection install git+https://github.com/Webfargo/ansible-collection-check_point.git
 ```
 
 ## Modules
