@@ -64,12 +64,18 @@ collects the following facts:
 - Cluster/HA status
 - Hardware platform
 - OS code name and build number
+- Deployment Agent build number
+- Check Point SNMP daemon status
+- Hotfixes per product/plugin
+- Policy status (if gateway)
+- Check Point version (R81.10, R81.20, R82, etc.)
 
 ```yaml
 - name: Gather all Check Point facts - ansible_facts
   webfargo.check_point.gather_facts:
 
-- debug:
+- name: Show installed Jumbo HFA version
+  ansible.builtin.debug:
     msg: >-
       {{ ansible_facts.check_point.host_type.description }},
       JHF Take {{ ansible_facts.check_point.hotfixes.FW1.jhf }}
@@ -78,7 +84,8 @@ collects the following facts:
   webfargo.check_point.gather_facts:
   register: chkp_facts
 
-- debug:
+- name: Installed Jumbo HFA from registered facts
+  ansible.builtin.debug:
     msg: >-
       {{ chkp_facts.host_type.description }},
       JHF Take {{ chkp_facts.facts.hotfixes.FW1.jhf }}
