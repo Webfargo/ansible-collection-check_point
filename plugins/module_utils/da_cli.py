@@ -215,9 +215,9 @@ class DaCliClient:
             if current_status == "success":
                 return self.parse_embedded_message(status)
 
-            if current_status == "failure":
+            if current_status in ("failure", "interrupted"):
                 raise DaCliError(
-                    f"Action {action_id} failed: "
+                    f"Action {action_id} failed with status '{current_status}': "
                     f"{status.get('message', 'no message')}",
                     stdout=json.dumps(status),
                 )
@@ -228,6 +228,7 @@ class DaCliClient:
             # cycle with this message before the host goes down.
             if (progress_hit_100
                 and current_status == "in progress"
+                and not is_upgrade
                 and self._is_reboot_imminent(message)):
                 status["status"] = "success"
 
