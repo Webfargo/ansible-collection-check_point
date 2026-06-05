@@ -6,7 +6,7 @@ readme: README.md
 authors:
   - Duane Toler <dtoler@webfargo.com>
 description: >-
-  Check Point Gaia OS automation modules for the Deployment Agent (da_cli),
+  Check Point Gaia OS automation modules for the Deployment Agent,
   facts gathering, and related operations.
 license:
   - GPL-3.0-or-later

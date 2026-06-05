@@ -1,7 +1,7 @@
 # Ansible Collection: webfargo.check_point
 
 Ansible modules for managing Check Point Gaia OS infrastructure:
-- Deployment Agent (da_cli) package operations
+- Deployment Agent package operations
 - System facts gathering (gather_facts)
 
 ## Requirements
@@ -56,6 +56,8 @@ ansible-galaxy collection install git+https://github.com/Webfargo/ansible-collec
 Gathers Check Point-specific system facts from Gaia OS hosts.  This module
 collects the following facts:
 
+- Check Point version (R81.20, R82, R82.10, etc.)
+- OS code name and build number
 - SIC certificate info
 - Host type (gateway/management/standalone)
 - Firewall policy
@@ -63,12 +65,9 @@ collects the following facts:
 - VSX status
 - Cluster/HA status
 - Hardware platform
-- OS code name and build number
 - Deployment Agent build number
 - Check Point SNMP daemon status
-- Hotfixes per product/plugin
 - Policy status (if gateway)
-- Check Point version (R81.10, R81.20, R82, etc.)
 
 ```yaml
 - name: Gather all Check Point facts - ansible_facts
@@ -115,7 +114,7 @@ before starting operations.  When a reboot is pending, returns
 Query available and installed packages from the Deployment Agent repository.
 
 ```yaml
-# Find the Recommended (stable) Jumbo HFA
+# Find the Recommended Jumbo HFA
 - webfargo.check_point.da_package_info:
     jumbo: recommended
     refresh: true
@@ -125,7 +124,7 @@ Query available and installed packages from the Deployment Agent repository.
     msg: "Recommended: {{ jumbo.package.filename }}"
   when: jumbo.found
 
-# Find the Latest (beta) Jumbo HFA — may not always exist
+# Find the Latest Jumbo HFA — may not always exist
 - webfargo.check_point.da_package_info:
     jumbo: latest
     refresh: true
@@ -136,7 +135,7 @@ Query available and installed packages from the Deployment Agent repository.
     category: major
   register: upgrades
 
-# List all installed packages (pass-through to da_cli)
+# List all installed packages
 - webfargo.check_point.da_package_info:
     status: installed
   register: installed
