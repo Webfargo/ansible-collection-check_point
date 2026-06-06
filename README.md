@@ -57,17 +57,16 @@ Gathers Check Point-specific system facts from Gaia OS hosts.  This module
 collects the following facts:
 
 - Check Point version (R81.20, R82, R82.10, etc.)
-- OS code name and build number
-- SIC certificate info
-- Host type (gateway/management/standalone)
-- Firewall policy
 - Installed hotfix versions (for all installed products)
+- Host type (gateway/management/standalone)
+- OS code name and build number
+- Deployment Agent build number
+- SIC certificate info
+- Hardware platform
 - VSX status
 - Cluster/HA status
-- Hardware platform
-- Deployment Agent build number
 - Check Point SNMP daemon status
-- Policy status (if gateway)
+- Firewall policy status (if gateway)
 
 ```yaml
 - name: Gather all Check Point facts - ansible_facts
