@@ -20,7 +20,7 @@ Ansible modules for managing Check Point Gaia OS infrastructure:
 
 > **Note:** This collection connects to Check Point hosts via SSH and executes
 > commands using the remote Python interpreter. Ansible 2.17 raised the minimum
-> remote Python requirement, which is not met by the Python version shipped with
+> remote Python requirement, which is not compatible with the Python version shipped with
 > R81.20 and earlier. You will see Python-related SSH connection failures if the
 > versions are mismatched.
 
