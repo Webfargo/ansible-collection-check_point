@@ -6,6 +6,7 @@
 
 from ansible.module_utils.basic import AnsibleModule
 import re
+import json
 
 DOCUMENTATION = r"""
 ---
@@ -267,6 +268,37 @@ class CkpFactsCollector:
             "description": description,
         }
 
+    # ----- Cloud Info Facts -----
+
+    def gather_cloud_info(self):
+        """
+        Read /etc/cloud-version.json for cloud platform metadata.
+        Returns parsed dict, or empty dict if not a cloud host
+        (file absent on physical/on-prem appliances).
+        Falls back to /etc/cloud-version (text format) if JSON not present.
+        """
+        rc, stdout, stderr = self._run("cat /etc/cloud-version.json")
+        if rc == 0 and stdout.strip():
+            try:
+                data = json.loads(stdout)
+                # Remove internal project/commit details — not useful as facts
+                data.pop("projects", None)
+                return data
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Fallback: older cloud hosts may only have the text format
+        rc, stdout, stderr = self._run("cat /etc/cloud-version")
+        if rc != 0 or not stdout.strip():
+            return {}
+
+        result = {}
+        for line in stdout.strip().splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                result[key.strip()] = value.strip()
+        return result
+
     # ----- Policy Facts -----
 
     def gather_policy(self, is_gateway=True):
@@ -302,6 +334,8 @@ class CkpFactsCollector:
             }
 
         return {"raw": stdout.strip()}
+
+    # ----- Hotfix Facts -----
 
     def gather_hotfixes(self):
         """
@@ -531,6 +565,9 @@ def main():
     # --- Host type is gathered first since policy depends on it ---
     if collect_all or "host_type" in subset:
         facts["host_type"] = collector.gather_host_type()
+
+    if collect_all or "cloud_info" in subset:
+        facts["cloud_info"] = collector.gather_cloud_info()
 
     if collect_all or "sic" in subset:
         facts["sic"] = collector.gather_sic()

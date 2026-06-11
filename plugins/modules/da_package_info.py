@@ -151,6 +151,7 @@ count:
   type: int
 """
 
+import json
 from ansible.module_utils.basic import AnsibleModule
 from ansible_collections.webfargo.check_point.plugins.module_utils.da_cli import (
     DaCliClient,
@@ -160,13 +161,30 @@ from ansible_collections.webfargo.check_point.plugins.module_utils.da_cli import
 
 def query_by_name(module, client):
     pkg_name = module.params["name"]
-    data = client.run(f"package_info package={pkg_name}", raw=True)
 
-    return {
-        "package": data,
-        "found": True,
-    }
+    try:
+        data = client.run(f"package_info package={pkg_name}", raw=True)
+        return {
+            "package": data,
+            "found": True,
+        }
+    except DaCliError as e:
+        # da_cli returns rc=3 with a JSON "No such package" message
+        # when the package name is not found. Treat as not-found rather
+        # than a hard failure.
+        if e.stdout:
+            try:
+                data = json.loads(e.stdout)
+                msg = data.get("Message", "")
 
+                if msg.lower().startswith("no such package"):
+                    module.fail_json(
+                        msg=f"Package not found in repository: {pkg_name}",
+                        package=pkg_name,
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
+        raise
 
 def query_by_jumbo(module, client):
     if module.params["jumbo"] == "recommended":

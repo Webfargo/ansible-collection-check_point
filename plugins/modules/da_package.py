@@ -46,9 +46,14 @@ options:
       - C(upgraded) performs a major version upgrade operation.
         Verify checks C(upgrade.applicable) for eligibility.
       - C(absent) uninstalls an installed package or deletes a downloaded
-        package from the local repository.
+        package from the local repository.  Automatically runs
+        verify before uninstall unless C(verify_before_uninstall) is false.
+      - C(verify_uninstall) checks whether a package can be safely
+        uninstalled. This operation is informational and does not
+        change system state. Returns a message indicating whether
+        uninstall is permitted.
     type: str
-    choices: [downloaded, private_download, imported, verified, installed, upgraded, absent]
+    choices: [downloaded, private_download, imported, verified, verify_uninstall, installed, upgraded, absent]
     required: true
   location:
     description:
@@ -94,11 +99,26 @@ options:
         (DEPENDENCY message-code) is treated as success rather than failure.
     type: bool
     default: true
+  verify_before_uninstall:
+    description:
+      - Automatically run verify_uninstall before uninstalling a package.
+      - Catches dependency blocks and ordering requirements before the
+        uninstall attempt. For example, if a newer take is installed on
+        top of the target package, verify_uninstall will fail with a
+        clear message indicating which package must be uninstalled first.
+      - Only relevant when C(state=absent) and the package is installed.
+    type: bool
+    default: true
   poll_interval:
     description:
       - Seconds between status polls for action commands.
+      - The default of 5 seconds is chosen to reliably detect the
+        stage 1 completion signal during Blink image upgrades, which
+        has an approximately 15-second window before the host reboots.
+        Higher values risk missing this window and causing an
+        UNREACHABLE error.
     type: int
-    default: 15
+    default: 5
   timeout:
     description:
       - Maximum seconds to wait for an action to complete.
@@ -155,6 +175,37 @@ EXAMPLES = r"""
     timeout: 600
   when: install_result.changed
 
+# Upgrade to a new major version (two-stage operation requiring playbook
+# reboot handling). The module returns status=reboot_pending when stage 1
+# completes and the host is about to reboot. Stage 2 runs after reboot
+# and must be monitored separately via da_status. Use ignore_errors=true
+# to handle platforms where the reboot signal may not be observed cleanly.
+- name: Upgrade to new version
+  webfargo.check_point.da_package:
+    name: "Check_Point_R82.10_T467_Gaia_Install_and_Upgrade.tgz"
+    state: upgraded
+    timeout: 3600
+  register: upgrade_result
+  ignore_errors: true
+
+- name: Wait for host to come back after stage 1 reboot
+  ansible.builtin.wait_for_connection:
+    connect_timeout: 3
+    delay: 30
+    sleep: 5
+    timeout: 600
+  when: >
+    upgrade_result.status == "reboot_pending" or
+    upgrade_result.failed | default(false)
+
+- name: Wait for stage 2 completion
+  webfargo.check_point.da_status:
+    wait_for_ready: true
+    timeout: 1800
+  when: >
+    upgrade_result.status == "reboot_pending" or
+    upgrade_result.failed | default(false)
+
 # Verify only (informational, no state change)
 - name: Pre-verify package
   webfargo.check_point.da_package:
@@ -165,6 +216,17 @@ EXAMPLES = r"""
 - name: Show verify details
   ansible.builtin.debug:
     msg: "Install applicable {{ verify_result.verify_details.install.applicable }}"
+
+# Verify uninstall is safe before removing a package
+- name: Verify package can be uninstalled
+  webfargo.check_point.da_package:
+    name: "Check_Point_R81_20_JHF_T141_HF2_MAIN_Bundle_T2_FULL.tgz"
+    state: verify_uninstall
+  register: verify_uninstall_result
+
+- name: Show verify uninstall result
+  ansible.builtin.debug:
+    msg: "{{ verify_uninstall_result.verify_details }}"
 
 # Uninstall a package completely
 - name: Uninstall hotfix
@@ -179,6 +241,7 @@ EXAMPLES = r"""
   webfargo.check_point.da_package:
     name: "Check_Point_R82_jumbo_hf_main_Bundle_T80_FULL.tgz"
     state: absent
+
 """
 
 RETURN = r"""
@@ -204,15 +267,25 @@ progress:
   type: str
 verify_details:
   description: >
-    Parsed verification results (from the embedded JSON in the Message
-    field of verify operations). Contains install/upgrade/clean-install
-    applicability and messages.
-  returned: when state is verified or verify_before_install runs
+    Parsed verification results. For C(state=verified), contains
+    install/upgrade/clean-install applicability and messages from
+    the embedded JSON in the Message field. For
+    C(state=verify_uninstall), contains the raw uninstall
+    eligibility message.
+  returned: when state is verified, verify_uninstall, or absent with verify_before_uninstall=true
   type: dict
 auto_selected:
   description: Whether the package was auto-selected (latest Jumbo HFA)
   returned: when name was not specified
   type: bool
+warnings:
+  description: >
+    Warning messages from verify operations. Uses bracket notation
+    to access C(install_warnings) and C(upgrade_warnings) keys in
+    verify_details since hyphens are not valid in Jinja2 dot notation.
+  returned: when state is verified, verify_uninstall, installed, or upgraded
+             and warnings are present
+  type: list
 """
 
 import json
@@ -397,6 +470,37 @@ def state_verified(module, client, params, package_name, current, _pkg_state):
     result["changed"] = False
     result["verify_details"] = _parse_verify_message(action_result)
 
+    # Surface warnings for both install and upgrade paths
+    install_warnings = _extract_warnings(result["verify_details"], "warning-install")
+    upgrade_warnings = _extract_warnings(result["verify_details"], "warning-upgrade")
+
+    all_warnings = install_warnings + upgrade_warnings
+
+    if all_warnings:
+        seen = set()
+        result["warnings"] = [
+            w for w in all_warnings
+            if not (w in seen or seen.add(w))
+        ]
+
+    return result
+
+
+def state_verify_uninstall(module, client, params, package_name, current, _pkg_state):
+    result = {}
+    if module.check_mode:
+        result["status"] = "would_verify_uninstall"
+        result["changed"] = False
+        return result
+
+    action_result = client.run_action(
+        f"verify_uninstall package={package_name}",
+        poll_interval=params["poll_interval"],
+        timeout=params["timeout"],
+    )
+    result.update(action_result)
+    result["changed"] = False
+    result["verify_details"] = _parse_verify_message(action_result)
     return result
 
 
@@ -458,8 +562,12 @@ def state_installed(module, client, params, package_name, current, _pkg_state):
         timeout=params["timeout"],
     )
 
+    # Preserve warnings set during verify before updating with action result
+    existing_warnings = result.get("warnings", [])
     result.update(action_result)
     result["changed"] = True
+    if existing_warnings:
+        result["warnings"] = existing_warnings
     return result
 
 
@@ -495,8 +603,12 @@ def state_upgraded(module, client, params, package_name, current, _pkg_state):
         is_upgrade=True,
     )
 
+    # Preserve warnings set during verify before updating with action result
+    existing_warnings = result.get("warnings", [])
     result.update(action_result)
     result["changed"] = True
+    if existing_warnings:
+        result["warnings"] = existing_warnings
     return result
 
 
@@ -513,6 +625,29 @@ def state_absent(module, client, params, package_name, current, _pkg_state):
             result["status"] = "would_uninstall"
             result["changed"] = True
             return result
+
+        # Step 1: Verify uninstall (if requested)
+        if params["verify_before_uninstall"]:
+            verify_cmd = f"verify_uninstall package={package_name}"
+            try:
+                verify_result = client.run_action(
+                    verify_cmd,
+                    poll_interval=params["poll_interval"],
+                    timeout=params["timeout"],
+                )
+            except DaCliError as ve:
+                module.fail_json(
+                    msg=f"Package cannot be uninstalled: {ve}",
+                    package=package_name,
+                )
+
+            msg = verify_result.get("message", "")
+            if isinstance(msg, str) and "not installed" in msg.lower():
+                result["status"] = "not_present"
+                result["changed"] = False
+                return result
+
+            result["verify_details"] = {"message": msg}
 
         uninstall_cmd = (
             f"uninstall package={package_name}"
@@ -562,6 +697,7 @@ STATE_HANDLERS = {
     "private_download": state_private_download,
     "imported": state_imported,
     "verified": state_verified,
+    "verify_uninstall": state_verify_uninstall,
     "installed": state_installed,
     "upgraded": state_upgraded,
     "absent": state_absent,
@@ -586,7 +722,8 @@ def main():
             role=dict(type="str"),
             refresh=dict(type="bool", default=False),
             verify_before_install=dict(type="bool", default=True),
-            poll_interval=dict(type="int", default=15),
+            verify_before_uninstall=dict(type="bool", default=True),
+            poll_interval=dict(type="int", default=5),
             timeout=dict(type="int", default=900),
         ),
         required_if=[

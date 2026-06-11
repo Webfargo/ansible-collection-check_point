@@ -61,6 +61,15 @@ class DaCliClient:
         rc, stdout, stderr = self.module.run_command(cmd)
 
         if rc != 0:
+            # da_cli writes plain text "Error: ..." to stdout (not stderr)
+            # for invalid arguments such as bad package names or extensions.
+            # Surface the first line as a clean error message.
+            if stdout and stdout.strip().startswith("Error:"):
+                first_line = stdout.strip().splitlines()[0]
+                raise DaCliError(
+                    f"da_cli rejected command: {first_line}",
+                    rc=rc, stdout=stdout, stderr=stderr,
+                )
             raise DaCliError(
                 f"da_cli command failed (rc={rc}): {stderr.strip()}",
                 rc=rc, stdout=stdout, stderr=stderr,
@@ -147,40 +156,52 @@ class DaCliClient:
         can show Progress "100" while Status remains "in progress" —
         always wait for Status to become "success" or "failure".
 
-        Reboot-triggering actions (install, uninstall, upgrade) emit a
+        Reboot-triggering actions (install, uninstall) emit a
         reboot-imminent message in the Message field at Progress 100
         while Status remains "in progress". Known signals:
           - Install:   "Going to reboot:"
           - Uninstall: "Uninstallation Complete"
-          - Upgrade:   TBD
         When detected, the action is treated as successful and the
         module returns before the host goes down. This requires
         reboot_delay to be set on the da_cli command so at least one
         poll cycle captures the message before the reboot fires.
+
+        Upgrade operations use a different completion model. Two-stage
+        upgrades (Blink images, clean install packages) reboot between
+        stages. The observable signal is DAService State transitioning
+        to "down" at Progress 100 — at that point stage 1 is complete
+        and the reboot is imminent. The module returns "reboot_pending"
+        and cannot continue — the Python process running on the remote
+        host will not survive the reboot. The playbook must handle
+        wait_for_connection and stage 2 monitoring via da_status with
+        wait_for_ready=true.
+
+        On platforms or package types where DAService State does not
+        transition to "down" before the reboot, SSH will drop and a
+        DaCliError is raised with context indicating the upgrade reboot
+        window was not cleanly observed. The playbook should use
+        ignore_errors=true and handle this via a when: failed block.
 
         Args:
             action_id: The action ID to monitor
             poll_interval: Seconds between polls (default 10)
             timeout: Override instance timeout for this poll
             is_upgrade: If True, use upgrade-specific completion logic.
-                Upgrade packages have an additional quirk on top of the
-                normal Progress/Status behavior: the system reboots
-                while Status is still "in progress", da_cli becomes
-                unreachable, and after reboot the same Action ID can
-                be polled again as Progress drops back and climbs to
-                100 a second time. This flag enables handling of SSH
-                connection failures during that reboot window.
+                The module watches for DAService State "down" as the
+                stage 1 completion signal and returns "reboot_pending".
 
         Returns:
-            Final action status response (normalized)
+            Final action status response (normalized). For upgrades,
+            status may be "reboot_pending" rather than "success".
 
         Raises:
-            DaCliError if action fails or times out
+            DaCliError if action fails, is interrupted, or times out.
+            For upgrades, also raised if SSH drops before the
+            DAService State "down" signal is observed.
         """
 
         effective_timeout = timeout or self.timeout
         elapsed = 0
-        reboot_detected = False
         progress_hit_100 = False
 
         while elapsed < effective_timeout:
@@ -188,22 +209,20 @@ class DaCliClient:
                 status = self.run(
                     f"get_status_of_action actionID={action_id}"
                 )
-            except DaCliError:
+            except DaCliError as e:
                 if is_upgrade and progress_hit_100:
-                    reboot_detected = True
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-                    continue
-                elif is_upgrade and reboot_detected:
-                    time.sleep(poll_interval)
-                    elapsed += poll_interval
-                    continue
-                else:
-                    raise
+                    raise DaCliError(
+                        f"Action {action_id} lost SSH connection during upgrade "
+                        f"reboot window (Progress was 100, DAService State 'down' "
+                        f"not observed before connection dropped): {e}",
+                        rc=e.rc, stdout=e.stdout, stderr=e.stderr,
+                    )
+                raise
 
             current_status = status.get("status", "unknown")
             progress = status.get("progress", "0")
             message = status.get("message", "") or ""
+            da_service_state = status.get("da_service_state", "")
 
             try:
                 progress_int = int(progress) if progress else 0
@@ -222,20 +241,40 @@ class DaCliClient:
                     stdout=json.dumps(status),
                 )
 
+            # Uninstall: DAService State going down means uninstall complete,
+            # reboot is imminent. More reliable than Message string alone
+            # since "Uninstallation Complete" persists through the reboot
+            # window. Return success now before the connection drops.
+            if (not is_upgrade
+                    and da_service_state == "down"
+                    and progress_hit_100):
+                status["status"] = "success"
+                return self.parse_embedded_message(status)
+
             # Reboot imminent — install/uninstall succeeded, reboot countdown
             # started. Exit now before the connection drops.
             # Requires reboot_delay to be set so we get at least one poll
             # cycle with this message before the host goes down.
             if (progress_hit_100
-                and current_status == "in progress"
-                and not is_upgrade
-                and self._is_reboot_imminent(message)):
+                    and current_status == "in progress"
+                    and not is_upgrade
+                    and self._is_reboot_imminent(message)):
                 status["status"] = "success"
-
                 return self.parse_embedded_message(status)
 
-            # Upgrade quirk: Status stays "in progress" at Progress 100,
-            # then system reboots. Don't treat this as completion.
+            # Upgrade: DAService State going down means stage 1 complete,
+            # reboot is imminent. Return reboot_pending now — the module
+            # cannot survive the reboot. Confirmed on aarch64 Blink images;
+            # behavior on other platforms/package types may differ.
+            if is_upgrade and da_service_state == "down":
+                status["status"] = "reboot_pending"
+                return self.parse_embedded_message(status)
+
+            # Upgrade fallback: on platforms where DAService State does not
+            # transition to "down", keep polling. If the host reboots before
+            # the signal is observed, the except block above will raise with
+            # context. This pass is intentional — do not treat Progress 100
+            # + Status "in progress" as completion for upgrades.
             if is_upgrade and progress_hit_100 and current_status == "in progress":
                 pass
 
@@ -318,10 +357,12 @@ class DaCliClient:
         vary across DA build versions.
         """
         status = self.get_da_status()
+        update_status = status.get("Update Status", "done")
+
         return (
             status.get("DAService State") == "ready"
             and not status.get("Installation in Progress", False)
-            and status.get("Update Status", "done") == "done"
+            and update_status in ("done", "not allowed")
         )
 
     def check_for_updates(self, poll_interval=10, timeout=None):
