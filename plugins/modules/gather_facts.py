@@ -462,6 +462,22 @@ class CkpFactsCollector:
         """Check if host is a cluster (HA) member."""
         return self._run_cpprod_util("FwIsHighAvail")
 
+    def gather_cluster_state(self):
+        rc, stdout, stderr = self._run(
+            "cphaprob state"
+        )
+
+        if rc != 0:
+            return "unknown"
+
+        for line in stdout.splitlines():
+            if "(local)" in line:
+                for part in line.split():
+                    if part in ("ACTIVE", "STANDBY"):
+                        return part
+
+        return "unknown"
+
     # ----- cpsnmpd Facts -----
 
     def gather_cpsnmpd(self):
@@ -592,6 +608,9 @@ def main():
 
     if collect_all or "cluster" in subset:
         facts["cluster"] = collector.gather_cluster()
+
+    if collect_all or "cluster_state" in subset:
+        facts["cluster_state"] = collector.gather_cluster_state() if facts.get("cluster") else None
 
     if collect_all or "hardware" in subset:
         facts["hardware"] = collector.gather_hardware()
