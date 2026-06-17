@@ -2,6 +2,54 @@
 
 All notable changes to the `webfargo.check_point` Ansible collection are documented here.
 
+## [0.8.0] - 2026-06-17
+
+### Added
+
+- `gather_facts` — new `cluster_state` subset and fact, parsed from `cphaprob state` output.
+  Returns `ACTIVE`, `STANDBY`, or `unknown` for the local cluster member; returns `null`
+  when the host is not a cluster member (`cluster` fact is `false`)
+- `gather_facts` — `gather_hardware()` now returns a `cpu` field, parsed from the
+  `CPU Model` line of `clish -c 'show asset system'` output
+- `gather_facts` — `gather_hotfixes()` now captures `BUNDLE_*` prefixed lines in addition to
+  `HOTFIX_*` lines, so the `[CPUpdates]` product section (previously empty) is now populated
+
+### Changed
+
+- `gather_facts` — `hotfixes` return value restructured: each entry in a product's `hotfixes`
+  list is now a `{"name": ..., "take": ...}` dict instead of a bare string, so one-off
+  hotfixes layered on top of a Jumbo HFA (e.g. `HOTFIX_R82_JHF_T103_HF2_MAIN`) report their
+  own `take` number instead of having it silently discarded
+- `gather_facts` — `hotfixes` return value now wraps per-product detail under a `products`
+  key, with a new top-level `jhf` key holding the Jumbo HFA take number sourced from the
+  `FW1` product only. Per-product `jhf` is no longer set on every product line that happens
+  to carry a `JUMBO_HF_MAIN` entry — it is now scoped to `FW1` exclusively
+  (e.g. `chkp_facts.hotfixes.jhf` instead of `chkp_facts.hotfixes.FW1.jhf`)
+- `gather_facts` — `gather_hardware()` platform detection now checks both the `Platform`
+  and `Model` fields from `show asset system` output (previously only checked `Platform`),
+  fixing Check Point appliances misreported as `platform: unknown` when the vendor string
+  appeared only in `Model`
+- `gather_facts` — `gather_hardware()` `model` field now falls back to the raw `Platform`
+  value when no explicit `Model` field is present in the clish output (e.g. HP ProLiant
+  hosts, which report the model string in `Platform` rather than `Model`)
+- `gather_facts` — `gather_cpda()` `build` field is now returned as an `int` instead of a
+  `str`, matching long-standing downstream usage (`build | int`); falls back to `0` if the
+  value is non-numeric
+
+ ### Fixed
+
+- `gather_facts` — `gather_hardware()` no longer crashes with `UnboundLocalError` when
+  `Platform`, `Model`, or `CPU Model` fields are absent from `show asset system` output
+- `gather_facts` — `gather_hotfixes()` no longer drops the `Take:` number on hotfix lines
+  that don't match `JUMBO_HF_MAIN` or `JHF_COMP` (e.g. one-off hotfixes layered on top of
+  a Jumbo HFA)
+
+### Breaking Changes
+
+- `hotfixes.<product>.hotfixes` changed from flat list to list-of-dicts
+- `hotfixes.<product>.jhf` removed and moved to top-level `hotfixes.jhf` key
+- `cpda.build` changed from `str` to `int`; `0` means parsing error
+
 ## [0.7.0] - 2026-06-10
 
 ### Added
