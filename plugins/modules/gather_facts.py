@@ -16,7 +16,7 @@ description:
   - Collects Check Point-specific system information from Gaia OS hosts
     including SIC configuration, host type (gateway/management/standalone),
     installed firewall policy, hotfix versions, build take info, VSX status,
-    cluster status, and hardware platform.
+    cluster status, cluster member state, and hardware platform.
   - All facts are returned in a structured dict under C(facts) and
     optionally injected into C(ansible_facts) for downstream use.
 options:
@@ -28,7 +28,7 @@ options:
     type: list
     elements: str
     choices: [all, sic, host_type, policy, hotfixes, take, vsx, version,
-              cpda, take, cluster, hardware]
+              cpda, take, cluster, cluster_state, hardware, cloud_info]
     default: [all]
   set_ansible_facts:
     description:
@@ -66,10 +66,20 @@ EXAMPLES = r"""
       - host_type
   register: chkp_facts
 
-- name: Show Jumbo HFA take for FW1
+- name: Show Jumbo HFA take
   debug:
-    msg: "JHF Take: {{ chkp_facts.hotfixes.FW1.jhf }}"
-  when: "'FW1' in chkp_facts.hotfixes"
+    msg: "JHF Take: {{ chkp_facts.hotfixes.jhf }}"
+
+- name: Show all hotfixes installed on FW1
+  debug:
+    var: chkp_facts.hotfixes.products.FW1.hotfixes
+
+- name: Check for active cluster member
+  debug:
+    msg: "This member is ACTIVE"
+  when:
+    - ansible_facts.check_point.cluster
+    - ansible_facts.check_point.cluster_state == "ACTIVE"
 
 - name: Conditional on gateway
   block:
@@ -85,24 +95,105 @@ facts:
   returned: always
   type: dict
   contains:
+    cloud_info:
+      description: Cloud platform metadata, when running on a supported cloud platform
+      type: dict
+      returned: when host is running in a supported cloud environment
+      contains:
+        build:
+          description: Build number
+          type: str
+        deployment_method:
+          description: Deployment method (e.g. ftw)
+          type: str
+        license:
+          description: License model (e.g. byol, paygo)
+          type: str
+        platform:
+          description: Cloud platform identifier (e.g. azure, aws, gcp)
+          type: str
+        release:
+          description: Check Point release version
+          type: str
+        take:
+          description: Build take number
+          type: str
+        template_name:
+          description: Marketplace template name
+          type: str
+        template_type:
+          description: Marketplace template type
+          type: str
+        template_version:
+          description: Marketplace template version
+          type: str
     cluster:
       description: Whether host is a cluster (HA) member
       type: bool
+    cluster_state:
+      description:
+        - State of the local cluster member, as reported by C(cphaprob state).
+        - C(null) when the host is not a cluster member.
+      type: str
+      choices: [ACTIVE, STANDBY, unknown]
+      returned: when host is a cluster member
     cpda:
-      description: Build number of Gaia Deployment Agent
-      type: int
+      description: Check Point Gaia Deployment Agent information
+      type: dict
+      contains:
+        build:
+          description: Build number of the Gaia Deployment Agent
+          type: int
     cpsnmpd:
       description: Whether Check Point SNMP daemon is enabled
       type: bool
     hardware:
       description: Hardware platform information
       type: dict
+      contains:
+        platform:
+          description: Normalized platform identifier (e.g. dell, hp, check_point_appliance, virtual)
+          type: str
+        model:
+          description: Hardware model string
+          type: str
+        cpu:
+          description: CPU model string
+          type: str
     host_type:
       description: Gateway/management/standalone classification
       type: dict
     hotfixes:
-      description: Installed hotfixes keyed by product name
+      description: Installed hotfixes and bundles, grouped by Check Point product/component
       type: dict
+      contains:
+        jhf:
+          description: Jumbo Hotfix Accumulator take number, sourced from the FW1 product
+          type: str
+          returned: when available
+        products:
+          description: Per-product hotfix detail, keyed by product name (spaces replaced with underscores)
+          type: dict
+          contains:
+            name:
+              description: Original product name as reported by cpinfo (may contain spaces)
+              type: str
+            jhf:
+              description: Jumbo Hotfix Accumulator take number for this product
+              type: str
+              returned: FW1 product only, when available
+            hotfixes:
+              description: List of installed hotfixes/bundles for this product
+              type: list
+              elements: dict
+              contains:
+                name:
+                  description: Hotfix or bundle identifier
+                  type: str
+                take:
+                  description: Take number for this hotfix/bundle, if reported
+                  type: str
+                  returned: when available
     policy:
       description: Installed firewall policy (gateway only)
       type: dict
@@ -119,7 +210,6 @@ facts:
       description: Whether host is a VSX gateway
       type: bool
 """
-
 
 class CkpFactsCollector:
     """Collect Check Point-specific facts from a Gaia OS host."""
@@ -328,7 +418,7 @@ class CkpFactsCollector:
 
         if m:
             return {
-                "gw_host": m.group(1),
+                "host": m.group(1),
                 "policy_package": m.group(2),
                 "policy_date": m.group(3),
             }
@@ -339,16 +429,36 @@ class CkpFactsCollector:
 
     def gather_hotfixes(self):
         """
-        Parse cpinfo -y all output for installed hotfixes and JHF takes.
+        Parse cpinfo -y all output for installed hotfixes/bundles and JHF takes.
 
         The output is stateful — product headers like [FW1] set context
-        for subsequent hotfix lines. This is much cleaner in Python than
-        in cli_parse regex templates with shared state.
+        for subsequent hotfix/bundle lines. This is much cleaner in Python
+        than in cli_parse regex templates with shared state.
 
-        Example output:
+        Returns a dict shaped like:
+            {
+                "jhf": "103",          # JHF take, sourced from FW1 only
+                "products": {
+                    "FW1": {
+                        "name": "FW1",
+                        "jhf": "103",   # only present on FW1
+                        "hotfixes": [
+                            {"name": "HOTFIX_R82_JUMBO_HF_MAIN", "take": "103"},
+                            {"name": "HOTFIX_PUBLIC_CLOUD_CA_BUNDLE_AUTOUPDATE", "take": None},
+                        ],
+                    },
+                    ...
+                },
+            }
+
+        Both HOTFIX_* and BUNDLE_* prefixed lines are captured (the latter
+        appears under [CPUpdates] and elsewhere as the resolved bundle
+        take corresponding to each hotfix).
+
+        Example raw output:
             [FW1]
-              HOTFIX_R80_40_JUMBO_HF_MAIN  Take:  83
-              HOTFIX_R80_40_JHF_COMP       Take:  198
+              HOTFIX_R82_JHF_T103_HF2_MAIN  Take:  2
+              HOTFIX_R82_JUMBO_HF_MAIN      Take:  103
               HOTFIX_PUBLIC_CLOUD_CA_BUNDLE_AUTOUPDATE
         """
         rc, stdout, stderr = self._run("cpinfo -y all")
@@ -370,7 +480,6 @@ class CkpFactsCollector:
                 current_product = product_key
                 result[product_key] = {
                     "name": product_name,
-                    "jhf": None,
                     "hotfixes": [],
                 }
                 continue
@@ -384,34 +493,48 @@ class CkpFactsCollector:
                 continue
 
             # Jumbo HF main take: "HOTFIX_R80_40_JUMBO_HF_MAIN  Take:  83"
-            m = re.match(r'(HOTFIX_\S*JUMBO_HF_MAIN)\s+Take:\s+(\d+)', stripped)
+            # or bundle equivalent: "BUNDLE_R82_JUMBO_HF_MAIN  Take:  103"
+            m = re.match(r'((?:HOTFIX|BUNDLE)_\S*JUMBO_HF_MAIN)\s+Take:\s+(\d+)', stripped)
 
             if m:
-                result[current_product]["jhf"] = m.group(2)
-                result[current_product]["hotfixes"].append(m.group(1))
+                if current_product == "FW1":
+                    result[current_product]["jhf"] = m.group(2)
+                result[current_product]["hotfixes"].append(
+                    {"name": m.group(1), "take": m.group(2)}
+                )
                 continue
 
             # JHF component take: "HOTFIX_R80_40_JHF_COMP  Take:  198"
             # This is an alternative JHF version indicator; use it if
             # JUMBO_HF_MAIN wasn't found
-            m = re.match(r'(HOTFIX_\S*JHF_COMP)\s+Take:\s+(\d+)', stripped)
+            m = re.match(r'((?:HOTFIX|BUNDLE)_\S*JHF_COMP)\s+Take:\s+(\d+)', stripped)
 
             if m:
-                if result[current_product]["jhf"] is None:
+                if current_product == "FW1" and "jhf" not in result[current_product]:
                     result[current_product]["jhf"] = m.group(2)
 
-                result[current_product]["hotfixes"].append(m.group(1))
+                result[current_product]["hotfixes"].append(
+                    {"name": m.group(1), "take": m.group(2)}
+                )
 
                 continue
 
-            # Other hotfix line (no Take): "HOTFIX_PUBLIC_CLOUD_CA_..."
-            m = re.match(r'(HOTFIX_\S+)', stripped)
+            # Any other hotfix line, with or without its own Take number
+            # e.g. "HOTFIX_R82_JHF_T103_HF2_MAIN  Take:  2" (one-off on top of JHF)
+            # or   "HOTFIX_PUBLIC_CLOUD_CA_BUNDLE_AUTOUPDATE" (no take at all)
+            m = re.match(r'((?:HOTFIX|BUNDLE)_\S+)(?:\s+Take:\s+(\d+))?', stripped)
 
             if m:
-                result[current_product]["hotfixes"].append(m.group(1))
+                result[current_product]["hotfixes"].append(
+                    {"name": m.group(1), "take": m.group(2)}
+                )
                 continue
 
-        return result
+        return {
+            "jhf": result.get("FW1", {}).get("jhf"),
+            "products": result,
+        }
+
 
     # ----- VSX Facts -----
 
@@ -495,8 +618,13 @@ class CkpFactsCollector:
         if rc != 0 or not stdout.strip():
             return {"build" : 0}
 
+        try:
+            build = int(stdout.strip())
+        except ValueError:
+            build = 0
+
         return {
-            "build" : stdout.strip()
+            "build": build
         }
 
     # ----- Hardware Facts -----
