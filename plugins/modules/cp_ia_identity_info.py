@@ -95,18 +95,19 @@ identity_info:
       description: Computer name associated with this IP, when available.
       type: str
     machine_groups:
-      description: List of computer groups for the associated machine, when available.
+      description: List of computer groups for the associated machine. Empty list if the gateway did not return any, or omitted the field entirely.
       type: list
     machine_identity_source:
       description: Identity source that authenticated the machine session, when available.
       type: str
     combined_roles:
-      description: List of all Access Roles calculated for this IP, combining user and machine roles.
+      description: List of all Access Roles calculated for this IP, combining user and machine roles. Empty list if none were calculated or the field was omitted.
       type: list
     users:
       description:
         - List of user identity records found on this IP. Each Check Point gateway version
           may include slightly different sub-fields; the documented ones are shown below.
+        - Empty list when no user records were found (I(found=false)) or the field was omitted.
       type: list
       elements: dict
       contains:
@@ -224,10 +225,15 @@ def main():
         'message': message,
         'domain': parsed.get('domain') if isinstance(parsed, dict) else None,
         'machine': parsed.get('machine') if isinstance(parsed, dict) else None,
-        'machine_groups': parsed.get('machine-groups') if isinstance(parsed, dict) else None,
+        # List-shaped fields default to [] rather than None when the gateway
+        # omits the key, so these can always be safely iterated/indexed in
+        # Jinja (`{% for r in identity_info.combined_roles %}`) without a
+        # `| default([])` guard, regardless of whether this particular
+        # response happened to include the key.
+        'machine_groups': (parsed.get('machine-groups') if isinstance(parsed, dict) else None) or [],
         'machine_identity_source': parsed.get('machine-identity-source') if isinstance(parsed, dict) else None,
-        'combined_roles': parsed.get('combined-roles') if isinstance(parsed, dict) else None,
-        'users': parsed.get('users') if isinstance(parsed, dict) else None,
+        'combined_roles': (parsed.get('combined-roles') if isinstance(parsed, dict) else None) or [],
+        'users': (parsed.get('users') if isinstance(parsed, dict) else None) or [],
         'raw': parsed,
     }
 
