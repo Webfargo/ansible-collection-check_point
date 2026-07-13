@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-# Copyright: (c) 2026, Webfargo
+# Copyright: (c) 2026, Webfargo Data Security, Inc.
 # GNU General Public License v3.0+ (see https://www.gnu.org/licenses/gpl-3.0.txt)
 
 from __future__ import absolute_import, division, print_function
@@ -18,11 +18,13 @@ description:
     identity association. There is no session login/logout with this API -
     every call is authenticated with a pre-shared secret configured on the
     gateway object in SmartConsole.
-  - This is a fire-and-forget API. The gateway does not expose a way to check
-    whether an association already exists with the exact same attributes before
-    writing it, so this module always reports C(changed=true) on a successful
-    call (outside of check mode). Use the M(identity_facts) module if you need
-    to inspect current state first.
+  - I(state=present) always reports C(changed=true) on a successful call
+    (outside of check mode).  C(delete-identity) does report how many
+    associations it actually removed, so I(state=absent) reports
+    C(changed=false) when nothing matched I(ip_address) (or the given
+    range/subnet) rather than claiming a change that didn't happen.  Use the
+    M(cp_ia_identity_info) module if you need to inspect current state
+    before deciding whether to call this module at all.
 options:
   ia_host:
     description:
@@ -202,7 +204,6 @@ EXAMPLES = r'''
   webfargo.check_point.cp_ia_identity:
     ia_host: "{{ ia_mgmt_host }}"
     shared_secret: "{{ identity_api_secret }}"
-    state: present
     ip_address: "10.10.5.23"
     user: "jdoe"
     domain: "corp.example.com"
@@ -211,6 +212,7 @@ EXAMPLES = r'''
     fetch_user_groups: false
     calculate_roles: true
     identity_source: "{{ inventory_hostname }}"
+    state: present
 
 - name: Revoke a single association
   webfargo.check_point.cp_ia_identity:
@@ -249,7 +251,9 @@ http_status:
   type: int
   returned: when the API call was attempted
 count:
-  description: Number of identities deleted, as reported by the gateway. Only meaningful for state=absent.
+  description:
+    - Number of identities deleted, as reported by the gateway. Only meaningful for state=absent.
+    - When this is present and parses as an integer, it directly determines C(changed) for state=absent (a count of 0 means changed=false).
   type: int
   returned: when state=absent and the call succeeded
 response:
@@ -436,8 +440,22 @@ def main():
         except (TypeError, ValueError):
             count = parsed['count']
 
+    if endpoint == 'delete-identity':
+        # delete-identity is the one call where the gateway tells us whether
+        # it actually removed anything (via 'count'). If nothing matched,
+        # report changed=False instead of blindly claiming success changed
+        # something. If 'count' couldn't be parsed as an int, fall back to
+        # changed=True - we can't prove nothing happened, so don't claim
+        # idempotency we can't back up.
+        changed = (count != 0) if isinstance(count, int) else True
+    else:
+        # add-identity has no equivalent signal - the gateway doesn't say
+        # whether this created a new association or refreshed an identical
+        # existing one, so we can't claim idempotency here.
+        changed = True
+
     result = dict(
-        changed=True,
+        changed=changed,
         msg=msg or "{0} call succeeded".format(endpoint),
         http_status=status,
         response=parsed,
