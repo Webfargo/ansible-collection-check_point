@@ -46,7 +46,7 @@ requires_ansible: '>=2.15.0'
 #     redirect: ansible_collections.ns.col.plugins.module_utils.new_location
 
 # Groups of actions/modules that take a common set of options
-# action_groups:
-#   group_name:
-#     - module1
-#     - module2
+action_groups:
+  cp_ia:
+    - cp_ia_identity
+    - cp_ia_identity_info
