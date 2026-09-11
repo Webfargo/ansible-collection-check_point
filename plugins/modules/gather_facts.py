@@ -15,8 +15,8 @@ short_description: Gather Check Point Gaia OS specific facts
 description:
   - Collects Check Point-specific system information from Gaia OS hosts
     including SIC configuration, host type (gateway/management/standalone),
-    installed firewall policy, hotfix versions, build take info, VSX status,
-    cluster status, cluster member state, and hardware platform.
+    installed firewall policy, hotfix versions, live patch status, build take
+    info, VSX status, cluster status, cluster member state, and hardware platform.
   - All facts are returned in a structured dict under C(facts) and
     optionally injected into C(ansible_facts) for downstream use.
 options:
@@ -27,8 +27,8 @@ options:
       - Individual subsets can be specified to limit collection.
     type: list
     elements: str
-    choices: [all, sic, host_type, policy, hotfixes, take, vsx, version,
-              cpda, take, cluster, cluster_state, hardware, cloud_info]
+    choices: [all, sic, host_type, policy, hotfixes, live_patches, take, vsx,
+              version, cpda, cluster, cluster_state, hardware, cloud_info]
     default: [all]
   set_ansible_facts:
     description:
@@ -80,6 +80,19 @@ EXAMPLES = r"""
   when:
     - ansible_facts.check_point.cluster
     - ansible_facts.check_point.cluster_state == "ACTIVE"
+
+- name: Show all live patches
+  debug:
+    var: chkp_facts.live_patches
+
+- name: Check if a specific CVE is covered by a live patch
+  debug:
+    msg: "CVE-2026-85102 is live patched"
+  when: >-
+    chkp_facts.live_patches |
+    selectattr('comment', 'search', 'CVE-2026-85102') |
+    map(attribute='modules') | flatten |
+    selectattr('cover', 'equalto', 'ok') | list | length > 0
 
 - name: Conditional on gateway
   block:
@@ -151,14 +164,14 @@ facts:
       description: Hardware platform information
       type: dict
       contains:
-        platform:
-          description: Normalized platform identifier (e.g. dell, hp, check_point_appliance, virtual)
+        cpu:
+          description: CPU model string
           type: str
         model:
           description: Hardware model string
           type: str
-        cpu:
-          description: CPU model string
+        platform:
+          description: Normalized platform identifier (e.g. dell, hp, check_point_appliance, virtual)
           type: str
     host_type:
       description: Gateway/management/standalone classification
@@ -194,6 +207,45 @@ facts:
                   description: Take number for this hotfix/bundle, if reported
                   type: str
                   returned: when available
+    live_patches:
+      description:
+        - List of Check Point Live Patches applied to this host.
+        - Each entry represents one logical patch (identified by SK article or CVE
+          reference), collapsed from multiple symbol-level entries in C(cplp list --json).
+        - Returns an empty list if C(cplp) is not installed or no patches are applied.
+      type: list
+      elements: dict
+      contains:
+        comment:
+          description: SK article or CVE reference as reported by Check Point (C(cplp list) comment field)
+          type: str
+        applied_at:
+          description: Earliest timestamp at which this patch was applied, in ISO 8601 format
+          type: str
+        modules:
+          description: List of Check Point modules/processes covered by this patch
+          type: list
+          elements: dict
+          contains:
+            name:
+              description: Module and process name in C(patch:proc) format (e.g. C(cpcert:cpca))
+              type: str
+            status:
+              description: Patch status for this module (e.g. C(armed), C(ready))
+              type: str
+            cover:
+              description: Whether the patch is actively covering this host's build (C(ok) or C(none))
+              type: str
+            cover_token:
+              description:
+                - Reason the patch is not covering when C(cover) is C(none).
+                - C(jumbofix) means the JHF supersedes this patch.
+                - C(nopatch) means no patch is available for this build.
+                - C(null) when C(cover) is C(ok).
+              type: str
+            unsupported:
+              description: Whether the patch could not be applied to this host
+              type: bool
     policy:
       description: Installed firewall policy (gateway only)
       type: dict
@@ -536,6 +588,75 @@ class CkpFactsCollector:
         }
 
 
+    # ----- Live Patch facts -----
+
+    def gather_live_patches(self):
+        """
+        Parse cplp list --json output for installed Check Point Live Patches.
+
+        Live patches are kernel/process-level fixes applied without requiring
+        a reboot or policy install. Each logical patch (identified by comment/
+        SK or CVE reference) may cover multiple modules and processes.
+
+        Returns a list of logical patch entries, each with a list of affected
+        modules. Multiple symbol-level entries for the same comment+module are
+        collapsed into one module entry. The hex trailer on patch IDs (e.g.
+        cpcert:cpca:a6ec397432) is stripped to match native cplp list output.
+
+        Cover/status combinations:
+            cover=ok,   cover_token=None      — fully patched
+            cover=none, cover_token=jumbofix  — superseded by JHF, not needed
+            cover=none, cover_token=nopatch   — no patch available for this build
+        """
+        rc, stdout, stderr = self._run("cplp list --json")
+
+        if rc != 0 or not stdout.strip():
+            return []
+
+        try:
+            raw = json.loads(stdout)
+        except ValueError:
+            return []
+
+        # Group by comment, then by stripped patch_id (name:proc, no hex trailer)
+        groups = {}
+
+        for entry in raw:
+            comment = entry["comment"]
+            patch_id_short = ':'.join(entry["patch_id"].split(':')[:2])
+
+            if comment not in groups:
+                groups[comment] = {
+                    "comment": comment,
+                    "applied_at": entry["applied_at"],
+                    "modules": {},
+                }
+            else:
+                # Use earliest applied_at across entries for this comment
+                if entry["applied_at"] < groups[comment]["applied_at"]:
+                    groups[comment]["applied_at"] = entry["applied_at"]
+
+            # Collapse multiple symbol-level entries for same module
+            if patch_id_short not in groups[comment]["modules"]:
+                groups[comment]["modules"][patch_id_short] = {
+                    "name": patch_id_short,
+                    "status": entry["status"] if entry["cover"] == "ok" else entry["cover_token"],
+                    "cover": entry["cover"],
+                    "cover_token": entry["cover_token"],
+                    "unsupported": entry["unsupported"],
+                }
+
+        # Convert to list of dicts with modules as list
+        result = []
+        for group in groups.values():
+            result.append({
+                "comment": group["comment"],
+                "applied_at": group["applied_at"],
+                "modules": list(group["modules"].values()),
+            })
+
+        return result
+
     # ----- VSX Facts -----
 
     def gather_vsx(self):
@@ -724,6 +845,9 @@ def main():
 
     if collect_all or "hotfixes" in subset:
         facts["hotfixes"] = collector.gather_hotfixes()
+
+    if collect_all or "live_patches" in subset:
+        facts["live_patches"] = collector.gather_live_patches()
 
     if collect_all or "take" in subset:
         facts["take"] = collector.gather_take()
