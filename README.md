@@ -26,30 +26,64 @@ Ansible modules for managing Check Point Gaia OS infrastructure:
 
 ## Installation
 
-### Using requirements.yml (recommended)
-
-Add to your `requirements.yml`:
-
-```yaml
-collections:
-  - name: https://github.com/Webfargo/ansible-collection-check_point.git
-    type: git
-    version: main
-```
-
-Then install:
+### Install from Ansible Galaxy (recommended)
 
 ```bash
-ansible-galaxy collection install -r requirements.yml
+ansible-galaxy collection install webfargo.check_point
 ```
 
-### Direct install
+### Install from GitHub repo
 
 ```bash
 ansible-galaxy collection install git+https://github.com/Webfargo/ansible-collection-check_point.git
 ```
 
 ## Modules
+
+| Module                        | Description                                                                           |
+|-------------------------------|---------------------------------------------------------------------------------------|
+| cp_gateway_vpn_certificate.py | Renew VPN certificates on Check Point gateway or cluster objects                      |
+| cp_ia_identity_info.py        | Query Check Point Identity Awareness associations for one IP via the Identity Web API |
+| cp_ia_identity.py             | Add or delete Check Point Identity Awareness associations via the Identity Web API    |
+| da_command.py                 | Run arbitrary da_cli commands                                                         |
+| da_package_info.py            | Query Check Point Deployment Agent package information                                |
+| da_package.py                 | Manage Check Point packages via the Deployment Agent                                  |
+| da_status.py                  | Get Check Point Deployment Agent status                                               |
+| gather_facts.py               | Gather Check Point Gaia OS specific facts                                             |
+
+### `cp_gateway_vpn_certificate`
+
+```yaml
+- name: Renew VPN certificate on a simple gateway
+  webfargo.check_point.cp_gateway_vpn_certificate:
+    name: gw-prod-01
+    gateway_type: gateway
+    certificate_name: defaultCert
+    alternate_names:
+      - name_type: fqdn
+        value: gw-prod-01.example.com
+      - name_type: ip address
+        value: 192.0.2.10
+
+- name: Renew VPN certificate on a cluster object
+  webfargo.check_point.cp_gateway_vpn_certificate:
+    name: cluster-prod-01
+    gateway_type: cluster
+    certificate_name: defaultCert
+    alternate_names:
+      - name_type: fqdn
+        value: cluster-prod-01.example.com
+
+- name: Renew without auto-publishing (caller publishes later)
+  webfargo.check_point.cp_gateway_vpn_certificate:
+    name: gw-prod-02
+    gateway_type: gateway
+    certificate_name: defaultCert
+    auto_publish_session: false
+    alternate_names:
+      - name_type: ip address
+        value: 192.0.2.20
+```
 
 ### `gather_facts`
 
@@ -58,6 +92,7 @@ collects the following facts:
 
 - Check Point version (R81.20, R82, R82.10, etc.)
 - Installed hotfix versions (for all installed products)
+- Live Patch components and status
 - Host type (gateway/management/standalone)
 - OS code name and build number
 - Deployment Agent build number
@@ -89,7 +124,7 @@ collects the following facts:
       {{ chkp_facts.host_type.description }},
       JHF Take {{ chkp_facts.facts.hotfixes.FW1.jhf }}
 
-- name: Check if host is an Azure VM
+- name: Check if host is a cloud VM
   ansible.builtin.debug:
     msg: "Cloud platform: {{ chkp_facts.cloud_info.platform }}"
   when: chkp_facts.cloud_info.platform is defined
